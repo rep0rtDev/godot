@@ -578,6 +578,12 @@ private:
 		// Compute rasterization of small clusters: reads this surface's positions and indices.
 		RID vg_raster_uniform_set;
 		uint32_t vg_raster_flags = 0;
+		// Material pass straight from the visibility buffer (uniform set 4) and its per-surface parameters.
+		RID vg_material_uniform_set;
+		RID vg_material_params;
+		RID vg_material_visibility;
+		uint32_t vg_material_slot = UINT32_MAX;
+		Size2i vg_material_size;
 		uint32_t vg_node_count = 0;
 		uint32_t vg_cluster_count = 0;
 		uint64_t vg_last_pass = 0;
@@ -799,7 +805,11 @@ private:
 	void _virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion, bool p_software);
 	// Rasterizes the early or late software list of every camera surface, then writes the result into p_depth_framebuffer.
 	void _virtual_geometry_raster(const RenderDataRD *p_render_data, bool p_late, RID p_depth_framebuffer);
+	void _virtual_geometry_material_update(GeometryInstanceSurfaceDataCache *p_surface, uint32_t p_slot, RID p_shader);
 	bool virtual_geometry_software = false;
+	// Fullscreen material draws of software clusters in the last color pass (verbose diagnostics).
+	uint32_t virtual_geometry_material_draws = 0;
+	uint32_t virtual_geometry_material_draws_reported = UINT32_MAX;
 	void _virtual_geometry_fill_push_constant(RendererRD::VirtualGeometryEffect::PushConstant &r_push_constant, const Transform3D &p_view, const GeometryInstanceSurfaceDataCache *p_surface) const;
 	void _virtual_geometry_dispatch(RD::ComputeListID p_compute_list, const GeometryInstanceSurfaceDataCache *p_surface);
 	bool _virtual_geometry_occlusion(const RenderDataRD *p_render_data);

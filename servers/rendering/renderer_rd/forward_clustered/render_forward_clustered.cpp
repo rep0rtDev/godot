@@ -638,7 +638,18 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					// depth is pushed slightly back, so they need GREATER_OR_EQUAL instead of the pre-pass EQUAL test.
 					if (p_pass_mode == PASS_MODE_COLOR && virtual_geometry_software && surf->vg_raster_uniform_set.is_valid()) {
 						SceneShaderForwardClustered::ShaderData::PipelineKey software_key = pipeline_key;
-						software_key.depth_greater_equal = true;
+						// Default-transform opaque materials shade their software pixels straight from the visibility buffer.
+						const bool material_pass = surf->vg_material_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(surf->vg_material_uniform_set) &&
+								pipeline_key.color_pass_flags == 0 && !shader->uses_vertex && !shader->uses_position && !shader->writes_modelview_or_projection &&
+								!shader->uses_world_coordinates && !shader->uses_particle_trails && !shader->uses_point_size && !shader->uses_z_clip_scale;
+						if (material_pass) {
+							software_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_VG_MATERIAL;
+							software_key.vertex_format_id = RD::INVALID_ID;
+							software_key.cull_mode = RD::POLYGON_CULL_DISABLED;
+							software_key.primitive_type = RSE::PRIMITIVE_TRIANGLES;
+						} else {
+							software_key.depth_greater_equal = true;
+						}
 						RID software_pipeline;
 						while (true) {
 							software_pipeline = shader->pipeline_hash_map.get_pipeline(software_key, software_key.hash(), software_key.ubershader, software_key.ubershader ? RSE::PIPELINE_SOURCE_DRAW : RSE::PIPELINE_SOURCE_SPECIALIZATION);
@@ -658,8 +669,14 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 							}
 							RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, software_pipeline);
 							RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, software_push_constant_size);
-							for (uint32_t range = 3; range < RendererRD::VirtualGeometryEffect::COMMAND_RANGES; range++) {
-								RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * range_size, surf->vg_command_buffer, sizeof(uint32_t) * range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+							if (material_pass) {
+								RD::get_singleton()->draw_list_bind_uniform_set(draw_list, surf->vg_material_uniform_set, 4);
+								RD::get_singleton()->draw_list_draw(draw_list, false, 1, 3);
+								virtual_geometry_material_draws++;
+							} else {
+								for (uint32_t range = 3; range < RendererRD::VirtualGeometryEffect::COMMAND_RANGES; range++) {
+									RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * range_size, surf->vg_command_buffer, sizeof(uint32_t) * range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+								}
 							}
 							// Make the next element rebind its own pipeline.
 							prev_shader = nullptr;
@@ -4400,6 +4417,16 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 		RD::get_singleton()->free_rid(p_surface->vg_raster_uniform_set);
 	}
 	p_surface->vg_raster_uniform_set = RID();
+	if (p_surface->vg_material_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
+		RD::get_singleton()->free_rid(p_surface->vg_material_uniform_set);
+	}
+	p_surface->vg_material_uniform_set = RID();
+	if (p_surface->vg_material_params.is_valid()) {
+		RD::get_singleton()->free_rid(p_surface->vg_material_params);
+		p_surface->vg_material_params = RID();
+	}
+	p_surface->vg_material_visibility = RID();
+	p_surface->vg_material_slot = UINT32_MAX;
 	p_surface->vg_raster_flags = 0;
 	if (p_surface->vg_work_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_surface->vg_work_buffer);
@@ -4452,7 +4479,15 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 	if (!virtual_geometry) {
 		return;
 	}
+	if (virtual_geometry_material_draws != virtual_geometry_material_draws_reported) {
+		print_verbose(vformat("Virtual geometry: %d material pass draws.", virtual_geometry_material_draws));
+		virtual_geometry_material_draws_reported = virtual_geometry_material_draws;
+	}
+	virtual_geometry_material_draws = 0;
 	virtual_geometry_software = p_software;
+	if (virtual_geometry_software) {
+		scene_shader.enable_vg_shader_group();
+	}
 	virtual_geometry_pass++;
 
 	const Transform3D view = p_render_data->scene_data->cam_transform.affine_inverse();
@@ -4568,6 +4603,19 @@ void RenderForwardClustered::_virtual_geometry_raster(const RenderDataRD *p_rend
 	push_constant.size[1] = size.y;
 	push_constant.entry_capacity = RendererRD::VirtualGeometryEffect::ENTRY_CAPACITY;
 
+	if (!p_late) {
+		// Material pass needs set 4 to exist on the shaders; the layout is the same for every material.
+		RID material_shader;
+		if (scene_shader.default_material_shader_ptr && RD::get_singleton()->limit_get(RD::LIMIT_MAX_BOUND_UNIFORM_SETS) > 4) {
+			material_shader = scene_shader.default_material_shader_ptr->get_shader_variant(SceneShaderForwardClustered::PIPELINE_VERSION_VG_MATERIAL, 0, false);
+		}
+		for (uint32_t i = 0; i < virtual_geometry_camera_surface_count; i++) {
+			if (virtual_geometry_surfaces[i]->vg_raster_uniform_set.is_valid()) {
+				_virtual_geometry_material_update(virtual_geometry_surfaces[i], i, material_shader);
+			}
+		}
+	}
+
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_raster_pipeline());
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, virtual_geometry->get_raster_frame_uniform_set(), 1);
@@ -4593,6 +4641,75 @@ void RenderForwardClustered::_virtual_geometry_raster(const RenderDataRD *p_rend
 	RD::get_singleton()->compute_list_end();
 
 	virtual_geometry->resolve_software_depth(p_depth_framebuffer);
+}
+
+void RenderForwardClustered::_virtual_geometry_material_update(GeometryInstanceSurfaceDataCache *p_surface, uint32_t p_slot, RID p_shader) {
+	RD *rd = RD::get_singleton();
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	const uint64_t format = mesh_storage->mesh_surface_get_format(p_surface->surface);
+	// Uncompressed, unskinned surfaces only; everything else keeps the hardware redraw of its software clusters.
+	if (p_shader.is_null() || (format & (RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES | RSE::ARRAY_FLAG_USE_2D_VERTICES | RSE::ARRAY_FORMAT_BONES)) || !(format & RSE::ARRAY_FORMAT_NORMAL)) {
+		return;
+	}
+	const RID visibility = virtual_geometry->get_visibility_buffer();
+	const Size2i size = virtual_geometry->get_visibility_size();
+	if (p_surface->vg_material_params.is_null()) {
+		p_surface->vg_material_params = rd->uniform_buffer_create(sizeof(RendererRD::VirtualGeometryEffect::MaterialParams));
+	}
+	if (p_surface->vg_material_slot != p_slot || p_surface->vg_material_size != size) {
+		const uint32_t vertex_count = mesh_storage->mesh_surface_get_vertex_count(p_surface->surface);
+		uint32_t offsets[RSE::ARRAY_MAX];
+		uint32_t vertex_element_size = 0;
+		uint32_t normal_element_size = 0;
+		uint32_t attrib_element_size = 0;
+		uint32_t skin_element_size = 0;
+		RenderingServer::get_singleton()->mesh_surface_make_offsets_from_format(format & ~uint64_t(RSE::ARRAY_FORMAT_INDEX), vertex_count, 0, offsets, vertex_element_size, normal_element_size, attrib_element_size, skin_element_size);
+
+		RendererRD::VirtualGeometryEffect::MaterialParams params = {};
+		params.size[0] = size.x;
+		params.size[1] = size.y;
+		params.slot = p_slot;
+		params.flags = (mesh_storage->mesh_surface_has_16_bit_indices(p_surface->surface) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_INDEX_16 : 0) |
+				((format & RSE::ARRAY_FORMAT_TANGENT) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_TANGENT : 0) |
+				((format & RSE::ARRAY_FORMAT_COLOR) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_COLOR : 0) |
+				((format & RSE::ARRAY_FORMAT_TEX_UV) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_UV : 0) |
+				((format & RSE::ARRAY_FORMAT_TEX_UV2) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_UV2 : 0);
+		params.vertex_count = vertex_count;
+		params.normal_stride = normal_element_size;
+		params.attrib_stride = attrib_element_size;
+		params.color_offset = offsets[RSE::ARRAY_COLOR];
+		params.uv_offset = offsets[RSE::ARRAY_TEX_UV];
+		params.uv2_offset = offsets[RSE::ARRAY_TEX_UV2];
+		params.normal_offset = offsets[RSE::ARRAY_NORMAL];
+		params.depth_bias = RendererRD::VirtualGeometryEffect::SOFTWARE_DEPTH_BIAS;
+		rd->buffer_update(p_surface->vg_material_params, 0, sizeof(params), &params);
+		p_surface->vg_material_slot = p_slot;
+		p_surface->vg_material_size = size;
+	}
+	if (p_surface->vg_material_visibility == visibility && p_surface->vg_material_uniform_set.is_valid() && rd->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
+		return;
+	}
+	if (p_surface->vg_material_uniform_set.is_valid() && rd->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
+		rd->free_rid(p_surface->vg_material_uniform_set);
+	}
+	const RID vertex_buffer = mesh_storage->mesh_surface_get_vertex_buffer(p_surface->surface);
+	const RID attribute_buffer = mesh_storage->mesh_surface_get_attribute_buffer(p_surface->surface);
+	const RID buffers[6] = {
+		visibility,
+		virtual_geometry->get_entry_buffer(),
+		mesh_storage->mesh_surface_get_vg_cluster_buffer(p_surface->surface),
+		mesh_storage->mesh_surface_get_index_buffer(p_surface->surface),
+		vertex_buffer,
+		// Surfaces without color/UV have no attribute buffer; the shader then never reads binding 5.
+		attribute_buffer.is_valid() ? attribute_buffer : vertex_buffer,
+	};
+	Vector<RD::Uniform> uniforms;
+	for (uint32_t i = 0; i < 6; i++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, buffers[i]));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, p_surface->vg_material_params));
+	p_surface->vg_material_uniform_set = rd->uniform_set_create(uniforms, p_shader, 4);
+	p_surface->vg_material_visibility = visibility;
 }
 
 bool RenderForwardClustered::_virtual_geometry_occlusion(const RenderDataRD *p_render_data) {

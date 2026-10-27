@@ -544,6 +544,10 @@ public:
 		return reinterpret_cast<Mesh::Surface *>(p_surface)->index_buffer;
 	}
 
+	_FORCE_INLINE_ RID mesh_surface_get_attribute_buffer(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->attribute_buffer;
+	}
+
 	_FORCE_INLINE_ bool mesh_surface_has_16_bit_indices(void *p_surface) const {
 		return reinterpret_cast<Mesh::Surface *>(p_surface)->vertex_count <= 65536;
 	}

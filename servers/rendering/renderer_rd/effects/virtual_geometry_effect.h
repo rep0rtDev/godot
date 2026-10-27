@@ -173,6 +173,30 @@ public:
 	RID get_raster_pipeline() const { return raster_pipeline; }
 	// Set 1 of the raster shader: visibility buffer and entry table.
 	RID get_raster_frame_uniform_set() const { return raster_frame_uniform_set; }
+	RID get_visibility_buffer() const { return visibility_buffer; }
+	RID get_entry_buffer() const { return entry_buffer; }
+	Size2i get_visibility_size() const { return visibility_size; }
+	// Matches VGSurface in scene_forward_clustered_vg_inc.glsl.
+	struct MaterialParams {
+		uint32_t size[2];
+		uint32_t slot;
+		uint32_t flags;
+		uint32_t vertex_count;
+		uint32_t normal_stride;
+		uint32_t attrib_stride;
+		uint32_t color_offset;
+		uint32_t uv_offset;
+		uint32_t uv2_offset;
+		float depth_bias;
+		uint32_t normal_offset;
+	};
+	static_assert(sizeof(MaterialParams) == 48);
+	static constexpr uint32_t MATERIAL_FLAG_INDEX_16 = 1;
+	static constexpr uint32_t MATERIAL_FLAG_TANGENT = 2;
+	static constexpr uint32_t MATERIAL_FLAG_COLOR = 4;
+	static constexpr uint32_t MATERIAL_FLAG_UV = 8;
+	static constexpr uint32_t MATERIAL_FLAG_UV2 = 16;
+	static constexpr float SOFTWARE_DEPTH_BIAS = 1.0f / 65536.0f;
 	RID create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_vertex_buffer, RID p_index_buffer) const;
 	// Writes the depth of every rasterized pixel into p_framebuffer's depth attachment.
 	void resolve_software_depth(RID p_framebuffer);

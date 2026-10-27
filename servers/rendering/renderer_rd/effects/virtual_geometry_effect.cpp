@@ -340,7 +340,7 @@ void VirtualGeometryEffect::resolve_software_depth(RID p_framebuffer) {
 	ResolvePushConstant push_constant = {};
 	push_constant.size[0] = visibility_size.x;
 	push_constant.size[1] = visibility_size.y;
-	push_constant.bias = 1.0f / 65536.0f;
+	push_constant.bias = SOFTWARE_DEPTH_BIAS;
 
 	RD::DrawListID draw_list = rd->draw_list_begin(p_framebuffer, RD::DRAW_DEFAULT_ALL);
 	rd->draw_list_bind_render_pipeline(draw_list, *pipeline);

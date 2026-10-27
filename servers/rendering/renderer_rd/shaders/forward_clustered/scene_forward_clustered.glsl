@@ -20,58 +20,110 @@
 /* INPUT ATTRIBS */
 
 // Always contains vertex position in XYZ, can contain tangent angle in W.
+#ifdef MODE_VG_MATERIAL
+vec4 vertex_angle_attrib;
+#else
 layout(location = 0) in vec4 vertex_angle_attrib;
+#endif
 
 //only for pure render depth when normal is not used
 
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
 // Contains Normal/Axis in RG, can contain tangent in BA.
+#ifdef MODE_VG_MATERIAL
+vec4 axis_tangent_attrib;
+#else
 layout(location = 1) in vec4 axis_tangent_attrib;
+#endif
 #endif
 
 // Location 2 is unused.
 
 #if defined(COLOR_USED)
+#ifdef MODE_VG_MATERIAL
+vec4 color_attrib;
+#else
 layout(location = 3) in vec4 color_attrib;
+#endif
 #endif
 
 #ifdef UV_USED
+#ifdef MODE_VG_MATERIAL
+vec2 uv_attrib;
+#else
 layout(location = 4) in vec2 uv_attrib;
+#endif
 #endif
 
 #if defined(UV2_USED) || defined(USE_LIGHTMAP) || defined(MODE_RENDER_MATERIAL)
+#ifdef MODE_VG_MATERIAL
+vec2 uv2_attrib;
+#else
 layout(location = 5) in vec2 uv2_attrib;
+#endif
 #endif
 
 #if defined(CUSTOM0_USED)
+#ifdef MODE_VG_MATERIAL
+vec4 custom0_attrib;
+#else
 layout(location = 6) in vec4 custom0_attrib;
+#endif
 #endif
 
 #if defined(CUSTOM1_USED)
+#ifdef MODE_VG_MATERIAL
+vec4 custom1_attrib;
+#else
 layout(location = 7) in vec4 custom1_attrib;
+#endif
 #endif
 
 #if defined(CUSTOM2_USED)
+#ifdef MODE_VG_MATERIAL
+vec4 custom2_attrib;
+#else
 layout(location = 8) in vec4 custom2_attrib;
+#endif
 #endif
 
 #if defined(CUSTOM3_USED)
+#ifdef MODE_VG_MATERIAL
+vec4 custom3_attrib;
+#else
 layout(location = 9) in vec4 custom3_attrib;
+#endif
 #endif
 
 #if defined(BONES_USED) || defined(USE_PARTICLE_TRAILS)
+#ifdef MODE_VG_MATERIAL
+uvec4 bone_attrib;
+#else
 layout(location = 10) in uvec4 bone_attrib;
+#endif
 #endif
 
 #if defined(WEIGHTS_USED) || defined(USE_PARTICLE_TRAILS)
+#ifdef MODE_VG_MATERIAL
+vec4 weight_attrib;
+#else
 layout(location = 11) in vec4 weight_attrib;
+#endif
 #endif
 
 #ifdef MOTION_VECTORS
+#ifdef MODE_VG_MATERIAL
+vec4 previous_vertex_attrib;
+#else
 layout(location = 12) in vec4 previous_vertex_attrib;
+#endif
 
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
+#ifdef MODE_VG_MATERIAL
+vec4 previous_normal_attrib;
+#else
 layout(location = 13) in vec4 previous_normal_attrib;
+#endif
 #endif
 
 #endif // MOTION_VECTORS
@@ -765,6 +817,14 @@ void _unpack_vertex_attributes(vec4 p_vertex_in, vec3 p_compressed_aabb_position
 #endif
 }
 
+#ifdef MODE_VG_MATERIAL
+// Virtual geometry material pass: one fullscreen triangle, the fragment stage rebuilds the vertex outputs.
+void main() {
+	instance_index_interp = draw_call.instance_index;
+	vec2 base = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+	gl_Position = vec4(base * 2.0 - 1.0, 0.0, 1.0);
+}
+#else
 void main() {
 	uint instance_index = draw_call.instance_index;
 	if (!sc_multimesh()) {
@@ -858,6 +918,7 @@ void main() {
 
 			screen_position);
 }
+#endif // MODE_VG_MATERIAL
 
 #[fragment]
 
@@ -894,23 +955,39 @@ void main() {
 #define TEXTURE_STREAMING_NO_DEPTH_WRITE
 #endif
 
-#if !defined(DEPTH_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
+#if !defined(MODE_VG_MATERIAL) && !defined(DEPTH_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
 layout(early_fragment_tests) in;
 #endif
 #endif // TEXTURE_STREAMING
 
+#ifdef MODE_VG_MATERIAL
+vec3 vertex_interp;
+#else
 layout(location = 0) in vec3 vertex_interp;
+#endif
 
 #ifdef NORMAL_USED
+#ifdef MODE_VG_MATERIAL
+vec3 normal_interp;
+#else
 layout(location = 1) in vec3 normal_interp;
+#endif
 #endif
 
 #if defined(COLOR_USED)
+#ifdef MODE_VG_MATERIAL
+vec4 color_interp;
+#else
 layout(location = 2) in vec4 color_interp;
+#endif
 #endif
 
 #ifdef UV_USED
+#ifdef MODE_VG_MATERIAL
+vec2 uv_interp;
+#else
 layout(location = 3) in vec2 uv_interp;
+#endif
 #endif
 
 #include "../scene_forward_streaming_inc.glsl"
@@ -920,26 +997,61 @@ float streaming_lod = 32.0; // Defaults to value past the coursest quality.
 #endif
 
 #if defined(UV2_USED) || defined(USE_LIGHTMAP)
+#ifdef MODE_VG_MATERIAL
+vec2 uv2_interp;
+#else
 layout(location = 4) in vec2 uv2_interp;
+#endif
 #endif
 
 #ifdef TANGENT_USED
+#ifdef MODE_VG_MATERIAL
+vec3 tangent_interp;
+#else
 layout(location = 5) in vec3 tangent_interp;
+#endif
+#ifdef MODE_VG_MATERIAL
+vec3 binormal_interp;
+#else
 layout(location = 6) in vec3 binormal_interp;
+#endif
 #endif
 
 #ifdef MOTION_VECTORS
+#ifdef MODE_VG_MATERIAL
+vec4 screen_position;
+#else
 layout(location = 7) in vec4 screen_position;
+#endif
+#ifdef MODE_VG_MATERIAL
+vec4 prev_screen_position;
+#else
 layout(location = 8) in vec4 prev_screen_position;
+#endif
 #endif
 
 #ifdef MODE_DUAL_PARABOLOID
 
+#ifdef MODE_VG_MATERIAL
+float dp_clip;
+#else
 layout(location = 9) in float dp_clip;
+#endif
 
 #endif
 
+#ifdef MODE_VG_MATERIAL
+uint instance_index_interp;
+#else
 layout(location = 10) in flat uint instance_index_interp;
+#endif
+
+#ifdef MODE_VG_MATERIAL
+bool vg_front_facing = true;
+#define FRONT_FACING_VALUE vg_front_facing
+#else
+#define FRONT_FACING_VALUE gl_FrontFacing
+#endif
 
 #ifdef USE_LIGHTMAP
 #include "../bicubic_filter_inc.glsl"
@@ -954,7 +1066,11 @@ vec3 multiview_uv(vec2 uv) {
 ivec3 multiview_uv(ivec2 uv) {
 	return ivec3(uv, int(ViewIndex));
 }
+#ifdef MODE_VG_MATERIAL
+vec4 combined_projected;
+#else
 layout(location = 11) in vec4 combined_projected;
+#endif
 #else // USE_MULTIVIEW
 #define ViewIndex 0
 vec2 multiview_uv(vec2 uv) {
@@ -965,12 +1081,24 @@ ivec2 multiview_uv(ivec2 uv) {
 }
 #endif // !USE_MULTIVIEW
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
+#ifdef MODE_VG_MATERIAL
+vec4 diffuse_light_interp;
+#else
 layout(location = 12) in vec4 diffuse_light_interp;
+#endif
+#ifdef MODE_VG_MATERIAL
+vec4 specular_light_interp;
+#else
 layout(location = 13) in vec4 specular_light_interp;
+#endif
 #endif
 
 #if defined(POINT_SIZE_USED) && defined(POINT_COORD_USED)
+#ifdef MODE_VG_MATERIAL
+vec2 point_coord_interp;
+#else
 layout(location = 14) in vec2 point_coord_interp;
+#endif
 #endif
 
 //defines to keep compatibility with vertex
@@ -1226,7 +1354,7 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef NORMAL_USED
 	vec3 normal_highp = normal_interp;
 #if defined(DO_SIDE_CHECK)
-	if (!gl_FrontFacing) {
+	if (!FRONT_FACING_VALUE) {
 		normal_highp = -normal_highp;
 	}
 #endif // DO_SIDE_CHECK
@@ -3206,9 +3334,16 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 }
 
+#ifdef MODE_VG_MATERIAL
+#include "scene_forward_clustered_vg_inc.glsl"
+#endif
+
 void main() {
+#ifdef MODE_VG_MATERIAL
+	vg_material_setup(scene_data_block.data);
+#endif
 #ifdef UBERSHADER
-	bool front_facing = gl_FrontFacing;
+	bool front_facing = FRONT_FACING_VALUE;
 	if (uc_cull_mode() == POLYGON_CULL_BACK && !front_facing) {
 		discard;
 	} else if (uc_cull_mode() == POLYGON_CULL_FRONT && front_facing) {
@@ -3223,4 +3358,9 @@ void main() {
 #endif
 
 	fragment_shader(scene_data_block.data);
+#ifdef MODE_VG_MATERIAL
+	if (vg_quad_helper) {
+		discard;
+	}
+#endif
 }

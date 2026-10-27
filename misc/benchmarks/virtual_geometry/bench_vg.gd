@@ -1,6 +1,6 @@
 extends SceneTree
 # Benchmark: N instances of a dense mesh, regular vs virtual geometry.
-# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1 [--wall_off=<frame>]]
+# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1 [--wall_off=<frame>]] [--mat=tex]
 # --wall_off hides the occluder at the given frame, so the final frame checks that newly revealed geometry appears.
 # Prints average CPU frame time and GPU render time reported by the RenderingServer.
 
@@ -20,6 +20,26 @@ func arg(name: String, def: String) -> String:
 			return a.split("=")[1]
 	return def
 
+func textured_material() -> StandardMaterial3D:
+	var albedo := Image.create(256, 256, false, Image.FORMAT_RGBA8)
+	var normal := Image.create(256, 256, false, Image.FORMAT_RGBA8)
+	for y in 256:
+		for x in 256:
+			var checker := ((x / 16) + (y / 16)) % 2 == 0
+			albedo.set_pixel(x, y, Color(0.9, 0.8, 0.2) if checker else Color(0.1, 0.3, 0.8))
+			var dx := cos(x * TAU / 32.0) * 0.6
+			var dy := cos(y * TAU / 32.0) * 0.6
+			var n := Vector3(-dx, -dy, 1.0).normalized()
+			normal.set_pixel(x, y, Color(n.x * 0.5 + 0.5, n.y * 0.5 + 0.5, n.z * 0.5 + 0.5))
+	albedo.generate_mipmaps()
+	normal.generate_mipmaps()
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = ImageTexture.create_from_image(albedo)
+	mat.normal_enabled = true
+	mat.normal_texture = ImageTexture.create_from_image(normal)
+	mat.roughness = 0.4
+	return mat
+
 func _init() -> void:
 	var use_vg := arg("vg", "1") == "1"
 	var count := int(arg("count", "400"))
@@ -30,6 +50,9 @@ func _init() -> void:
 	sm.radial_segments = sm.rings * 2
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sm.get_mesh_arrays(), [], {}, Mesh.ARRAY_FLAG_USE_VIRTUAL_GEOMETRY if use_vg else 0)
+	if arg("mat", "") == "tex":
+		# Checker albedo plus a bump normal map, to compare UV, normal and tangent reconstruction.
+		mesh.surface_set_material(0, textured_material())
 	var root := Node3D.new()
 	var side := int(ceil(sqrt(count)))
 	for i in count:

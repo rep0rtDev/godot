@@ -321,6 +321,8 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 
 			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + shader_flags;
 		} break;
+		case PIPELINE_VERSION_VG_MATERIAL:
+			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + (p_ubershader ? 1 : 0);
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -432,7 +434,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	multisample_state.sample_count = RD::get_singleton()->framebuffer_format_get_texture_samples(p_pipeline_key.framebuffer_format_id, 0);
 
 	RD::PipelineColorBlendState blend_state;
-	if (p_pipeline_key.version == PIPELINE_VERSION_COLOR_PASS) {
+	if (p_pipeline_key.version == PIPELINE_VERSION_COLOR_PASS || p_pipeline_key.version == PIPELINE_VERSION_VG_MATERIAL) {
 		if (p_pipeline_key.color_pass_flags & PIPELINE_COLOR_PASS_FLAG_TRANSPARENT) {
 			if (alpha_antialiasing_mode == ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE) {
 				multisample_state.enable_alpha_to_coverage = true;
@@ -498,6 +500,18 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	sc.bool_value = emulate_point_size_flag;
 	sc.type = RD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL;
 	specialization_constants.push_back(sc);
+
+	if (p_pipeline_key.version == PIPELINE_VERSION_VG_MATERIAL) {
+		// Fullscreen triangle that writes the resolved software raster depth; only the frontmost pixels pass.
+		depth_stencil_state.enable_depth_test = true;
+		depth_stencil_state.enable_depth_write = false;
+		depth_stencil_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
+		depth_stencil_state.enable_stencil = false;
+		raster_state.cull_mode = RD::POLYGON_CULL_DISABLED;
+		raster_state.wireframe = false;
+		primitive_rd = RD::RENDER_PRIMITIVE_TRIANGLES;
+		blend_state = blend_state_color_opaque;
+	}
 
 	RID shader_rid = get_shader_variant(p_pipeline_key.version, p_pipeline_key.color_pass_flags, p_pipeline_key.ubershader);
 	ERR_FAIL_COND(shader_rid.is_null());
@@ -690,6 +704,10 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(group, version, false));
 		}
 
+		// SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ubershader.
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VG, "\n#define MODE_VG_MATERIAL\n", false));
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VG, "\n#define UBERSHADER\n#define MODE_VG_MATERIAL\n", false));
+
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
 		shader.initialize(shader_versions, p_defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
@@ -748,7 +766,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.renames["VIEWPORT_SIZE"] = "read_viewport_size";
 
 		actions.renames["FRAGCOORD"] = "gl_FragCoord";
-		actions.renames["FRONT_FACING"] = "gl_FrontFacing";
+		actions.renames["FRONT_FACING"] = "FRONT_FACING_VALUE";
 		actions.renames["NORMAL_MAP"] = "normal_map";
 		actions.renames["NORMAL_MAP_DEPTH"] = "normal_map_depth";
 		actions.renames["BENT_NORMAL_MAP"] = "bent_normal_map";
@@ -1038,6 +1056,10 @@ void SceneShaderForwardClustered::set_default_specialization(const ShaderSpecial
 
 void SceneShaderForwardClustered::enable_multiview_shader_group() {
 	shader.enable_group(SHADER_GROUP_MULTIVIEW);
+}
+
+void SceneShaderForwardClustered::enable_vg_shader_group() {
+	shader.enable_group(SHADER_GROUP_VG);
 }
 
 void SceneShaderForwardClustered::enable_advanced_shader_group(bool p_needs_multiview) {
