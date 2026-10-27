@@ -40,6 +40,7 @@
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/rendering/shader_language.h"
 #include "servers/rendering/shader_warnings.h"
+#include "servers/rendering/virtual_geometry.h"
 
 RenderingServer *RenderingServer::singleton = nullptr;
 RenderingServer *(*RenderingServer::create_func)() = nullptr;
@@ -1180,29 +1181,64 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 	ERR_FAIL_INDEX_V(p_primitive, RSE::PRIMITIVE_MAX, ERR_INVALID_PARAMETER);
 	ERR_FAIL_COND_V(p_arrays.size() != RSE::ARRAY_MAX, ERR_INVALID_PARAMETER);
 
+	Array arrays = p_arrays;
+	VirtualGeometryBuildResult vg_result;
+	bool use_virtual_geometry = false;
+	if (p_compress_format & RSE::ARRAY_FLAG_USE_VIRTUAL_GEOMETRY) {
+		p_compress_format &= ~uint64_t(RSE::ARRAY_FLAG_USE_VIRTUAL_GEOMETRY);
+		if (p_primitive != RSE::PRIMITIVE_TRIANGLES || p_arrays[RSE::ARRAY_VERTEX].get_type() != Variant::PACKED_VECTOR3_ARRAY || p_blend_shapes.size()) {
+			WARN_PRINT("Virtual geometry requires a 3D triangle surface without blend shapes; building a regular surface instead.");
+		} else {
+			Vector<Vector3> positions = p_arrays[RSE::ARRAY_VERTEX];
+			Vector<Vector3> normals;
+			if (p_arrays[RSE::ARRAY_NORMAL].get_type() == Variant::PACKED_VECTOR3_ARRAY) {
+				normals = p_arrays[RSE::ARRAY_NORMAL];
+			}
+			Vector<int> source_indices;
+			if (p_arrays[RSE::ARRAY_INDEX].get_type() == Variant::PACKED_INT32_ARRAY) {
+				source_indices = p_arrays[RSE::ARRAY_INDEX];
+			} else {
+				source_indices.resize(positions.size());
+				int *w = source_indices.ptrw();
+				for (int i = 0; i < positions.size(); i++) {
+					w[i] = i;
+				}
+			}
+			if (VirtualGeometry::build(positions, normals, source_indices, vg_result)) {
+				Vector<int> vg_indices;
+				vg_indices.resize(vg_result.indices.size());
+				memcpy(vg_indices.ptrw(), vg_result.indices.ptr(), sizeof(uint32_t) * vg_result.indices.size());
+				arrays = p_arrays.duplicate();
+				arrays[RSE::ARRAY_INDEX] = vg_indices;
+				use_virtual_geometry = true;
+				p_compress_format |= RSE::ARRAY_FLAG_USE_VIRTUAL_GEOMETRY;
+			}
+		}
+	}
+
 	uint64_t format = 0;
 
 	// Validation
 	int index_array_len = 0;
 	int array_len = 0;
 
-	for (int i = 0; i < p_arrays.size(); i++) {
-		if (p_arrays[i].get_type() == Variant::NIL) {
+	for (int i = 0; i < arrays.size(); i++) {
+		if (arrays[i].get_type() == Variant::NIL) {
 			continue;
 		}
 
 		format |= (1ULL << i);
 
 		if (i == RSE::ARRAY_VERTEX) {
-			switch (p_arrays[i].get_type()) {
+			switch (arrays[i].get_type()) {
 				case Variant::PACKED_VECTOR2_ARRAY: {
-					Vector<Vector2> v2 = p_arrays[i];
+					Vector<Vector2> v2 = arrays[i];
 					array_len = v2.size();
 					format |= RSE::ARRAY_FLAG_USE_2D_VERTICES;
 				} break;
 				case Variant::PACKED_VECTOR3_ARRAY: {
 					ERR_FAIL_COND_V(p_compress_format & RSE::ARRAY_FLAG_USE_2D_VERTICES, ERR_INVALID_PARAMETER);
-					Vector<Vector3> v3 = p_arrays[i];
+					Vector<Vector3> v3 = arrays[i];
 					array_len = v3.size();
 				} break;
 				default: {
@@ -1211,15 +1247,15 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 			}
 			ERR_FAIL_COND_V(array_len == 0, ERR_INVALID_DATA);
 		} else if (i == RSE::ARRAY_NORMAL) {
-			if (p_arrays[RSE::ARRAY_TANGENT].get_type() == Variant::NIL) {
+			if (arrays[RSE::ARRAY_TANGENT].get_type() == Variant::NIL) {
 				// We must use tangents if using normals.
 				format |= (1ULL << RSE::ARRAY_TANGENT);
 			}
 		} else if (i == RSE::ARRAY_BONES) {
-			switch (p_arrays[i].get_type()) {
+			switch (arrays[i].get_type()) {
 				case Variant::PACKED_INT32_ARRAY: {
-					Vector<Vector3> vertices = p_arrays[RSE::ARRAY_VERTEX];
-					Vector<int32_t> bones = p_arrays[i];
+					Vector<Vector3> vertices = arrays[RSE::ARRAY_VERTEX];
+					Vector<int32_t> bones = arrays[i];
 					int32_t bone_8_group_count = bones.size() / (RSE::ARRAY_WEIGHTS_SIZE * 2);
 					int32_t vertex_count = vertices.size();
 					if (vertex_count == bone_8_group_count) {
@@ -1231,7 +1267,7 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 				} break;
 			}
 		} else if (i == RSE::ARRAY_INDEX) {
-			index_array_len = PackedInt32Array(p_arrays[i]).size();
+			index_array_len = PackedInt32Array(arrays[i]).size();
 		}
 	}
 
@@ -1311,7 +1347,7 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 
 	Vector4 uv_scale = Vector4(0.0, 0.0, 0.0, 0.0);
 
-	Error err = _surface_set_data(p_arrays, format, offsets, vertex_element_size, normal_element_size, attrib_element_size, skin_element_size, vertex_array, attrib_array, skin_array, array_len, index_array, index_array_len, aabb, bone_aabb, uv_scale);
+	Error err = _surface_set_data(arrays, format, offsets, vertex_element_size, normal_element_size, attrib_element_size, skin_element_size, vertex_array, attrib_array, skin_array, array_len, index_array, index_array_len, aabb, bone_aabb, uv_scale);
 	ERR_FAIL_COND_V_MSG(err != OK, ERR_INVALID_DATA, "Invalid array format for surface.");
 
 	Vector<uint8_t> blend_shape_data;
@@ -1335,7 +1371,7 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 		}
 	}
 	Vector<RenderingServerTypes::SurfaceData::LOD> lods;
-	if (index_array_len) {
+	if (index_array_len && !use_virtual_geometry) {
 		LocalVector<Variant> keys = p_lods.get_key_list();
 		keys.sort(); // otherwise lod levels may get skipped
 		for (const Variant &E : keys) {
@@ -1388,6 +1424,11 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 	surface_data.bone_aabbs = bone_aabb;
 	surface_data.lods = lods;
 	surface_data.uv_scale = uv_scale;
+	if (use_virtual_geometry) {
+		surface_data.vg_cluster_data.resize(vg_result.clusters.size() * sizeof(VirtualGeometryCluster));
+		memcpy(surface_data.vg_cluster_data.ptrw(), vg_result.clusters.ptr(), surface_data.vg_cluster_data.size());
+		surface_data.vg_leaf_index_count = vg_result.leaf_index_count;
+	}
 
 	return OK;
 }
@@ -1802,7 +1843,7 @@ Array RenderingServer::mesh_create_arrays_from_surface_data(const RenderingServe
 	int vertex_len = p_data.vertex_count;
 
 	Vector<uint8_t> index_data = p_data.index_data;
-	int index_len = p_data.index_count;
+	int index_len = p_data.vg_leaf_index_count ? p_data.vg_leaf_index_count : p_data.index_count;
 
 	uint64_t format = p_data.format;
 
@@ -1965,6 +2006,11 @@ static RenderingServerTypes::SurfaceData _dict_to_surf(const Dictionary &p_dicti
 		sd.uv_scale = p_dictionary["uv_scale"];
 	}
 
+	if (p_dictionary.has("vg_clusters")) {
+		sd.vg_cluster_data = p_dictionary["vg_clusters"];
+		sd.vg_leaf_index_count = p_dictionary.get("vg_leaf_index_count", 0);
+	}
+
 	if (p_dictionary.has("lods")) {
 		Array lods = p_dictionary["lods"];
 		for (int i = 0; i < lods.size(); i++) {
@@ -2026,6 +2072,11 @@ Dictionary RenderingServer::_mesh_get_surface(RID p_mesh, int p_idx) {
 	}
 	d["aabb"] = sd.aabb;
 	d["uv_scale"] = sd.uv_scale;
+
+	if (sd.vg_cluster_data.size()) {
+		d["vg_clusters"] = sd.vg_cluster_data;
+		d["vg_leaf_index_count"] = sd.vg_leaf_index_count;
+	}
 
 	if (sd.lods.size()) {
 		Array lods;
@@ -2458,6 +2509,7 @@ void RenderingServer::_bind_methods() {
 	BIND_BITFIELD_FLAG(RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES);
 
 	BIND_BITFIELD_FLAG(RSE::ARRAY_FLAG_USE_STORAGE_BUFFER);
+	BIND_BITFIELD_FLAG(RSE::ARRAY_FLAG_USE_VIRTUAL_GEOMETRY);
 
 	BIND_BITFIELD_FLAG(RSE::ARRAY_FLAG_FORMAT_VERSION_BASE);
 	BIND_BITFIELD_FLAG(RSE::ARRAY_FLAG_FORMAT_VERSION_SHIFT);
@@ -3685,6 +3737,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/textures/webp_compression/lossless_compression_factor", PROPERTY_HINT_RANGE, "0,100,1"), 25);
 
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/limits/time/time_rollover_secs", PROPERTY_HINT_RANGE, "1,10000,1,or_greater,suffix:s"), 3600);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/virtual_geometry/pixel_error", PROPERTY_HINT_RANGE, "0.1,16,0.01"), 1.0);
 
 	GLOBAL_DEF_RST("rendering/lights_and_shadows/use_physical_light_units", false);
 

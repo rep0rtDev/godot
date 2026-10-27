@@ -197,6 +197,9 @@ enum ArrayFormat : uint64_t {
 	// compute shaders. Required to write into them from a compute pipeline through the RIDs
 	// returned by `mesh_surface_get_vertex_buffer_rd_rid` and friends.
 	ARRAY_FLAG_USE_STORAGE_BUFFER = 1 << (ARRAY_COMPRESS_FLAGS_BASE + 5),
+	// When set, the surface is converted into a hierarchy of triangle clusters at creation time.
+	// The Forward+ renderer selects a crack-free level of detail per cluster on the GPU every frame.
+	ARRAY_FLAG_USE_VIRTUAL_GEOMETRY = 1ULL << (ARRAY_COMPRESS_FLAGS_BASE + 6),
 	// We leave enough room for up to 4 more compression flags.
 
 	ARRAY_FLAG_FORMAT_VERSION_BASE = ARRAY_COMPRESS_FLAGS_BASE + 10,

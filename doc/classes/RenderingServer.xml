@@ -5024,6 +5024,9 @@
 		<constant name="ARRAY_FLAG_USE_STORAGE_BUFFER" value="1073741824" enum="ArrayFormat" is_bitfield="true">
 			Flag used to mark that the surface's vertex, attribute, skin, and index buffers must be created with the storage-buffer usage bit so they can be bound as storage buffers in compute shaders. This is required to write into them from a compute pipeline through the [RID]s returned by [method RenderingServer.mesh_surface_get_vertex_buffer_rd_rid] and the matching methods for the attribute, skin, and index buffers. Has no effect on the OpenGL backend, which does not expose [RenderingDevice] [RID]s.
 		</constant>
+		<constant name="ARRAY_FLAG_USE_VIRTUAL_GEOMETRY" value="2147483648" enum="ArrayFormat" is_bitfield="true">
+			Flag used to convert the surface into virtual geometry: a hierarchy of triangle clusters with progressively simplified levels of detail. The Forward+ renderer selects, on the GPU and per cluster, the coarsest level whose error stays below [member ProjectSettings.rendering/virtual_geometry/pixel_error] pixels, and draws the result with a single indirect multi-draw. Only triangle surfaces with 3D vertices and no blend shapes are supported; other renderers draw the full-detail mesh.
+		</constant>
 		<constant name="ARRAY_FLAG_FORMAT_VERSION_BASE" value="35" enum="ArrayFormat" is_bitfield="true">
 			Flag used to mark the start of the bits used to store the mesh version.
 		</constant>

@@ -3593,6 +3593,9 @@
 		<member name="rendering/viewport/transparent_background" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], enables [member Viewport.transparent_bg] on the root viewport. This allows per-pixel transparency to be effective after also enabling [member display/window/size/transparent] and [member display/window/per_pixel_transparency/allowed].
 		</member>
+		<member name="rendering/virtual_geometry/pixel_error" type="float" setter="" getter="" default="1.0">
+			Maximum projected simplification error, in pixels, allowed when the renderer selects levels of detail for meshes using [constant Mesh.ARRAY_FLAG_USE_VIRTUAL_GEOMETRY]. Lower values keep more detail at the cost of more triangles.
+		</member>
 		<member name="rendering/vrs/mode" type="int" setter="" getter="" default="0">
 			Set the default Variable Rate Shading (VRS) mode for the main viewport. See [member Viewport.vrs_mode] to change this at runtime, and [enum Viewport.VRSMode] for possible values.
 		</member>

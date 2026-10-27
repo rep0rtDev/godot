@@ -33,6 +33,7 @@
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_types.h"
+#include "servers/rendering/virtual_geometry.h"
 
 using namespace RendererRD;
 
@@ -420,7 +421,16 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 		s->index_buffer = RD::get_singleton()->index_buffer_create(new_surface.index_count, is_index_16 ? RD::INDEX_BUFFER_FORMAT_UINT16 : RD::INDEX_BUFFER_FORMAT_UINT32, new_surface.index_data, false, requested_storage_flag);
 		s->index_buffer_size = new_surface.index_data.size();
 		s->index_count = new_surface.index_count;
-		s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
+		if (new_surface.vg_cluster_data.size() && new_surface.vg_leaf_index_count > 0 && new_surface.vg_leaf_index_count <= new_surface.index_count) {
+			s->vg_cluster_data = new_surface.vg_cluster_data;
+			s->vg_cluster_count = new_surface.vg_cluster_data.size() / sizeof(VirtualGeometryCluster);
+			s->vg_leaf_index_count = new_surface.vg_leaf_index_count;
+			s->vg_cluster_buffer = RD::get_singleton()->storage_buffer_create(new_surface.vg_cluster_data.size(), new_surface.vg_cluster_data);
+			s->vg_index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
+			s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->vg_leaf_index_count);
+		} else {
+			s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
+		}
 		if (new_surface.lods.size()) {
 			s->lods = memnew_arr(Mesh::Surface::LOD, new_surface.lods.size());
 			s->lod_count = new_surface.lods.size();
@@ -532,6 +542,9 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 		memfree(s.versions); // reallocs, so free with memfree.
 	}
 
+	if (s.vg_cluster_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(s.vg_cluster_buffer);
+	}
 	if (s.index_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.index_buffer);
 	}
@@ -697,6 +710,8 @@ RenderingServerTypes::SurfaceData MeshStorage::mesh_get_surface(RID p_mesh, int 
 	if (sd.index_count) {
 		sd.index_data = RD::get_singleton()->buffer_get_data(s.index_buffer);
 	}
+	sd.vg_cluster_data = s.vg_cluster_data;
+	sd.vg_leaf_index_count = s.vg_leaf_index_count;
 	sd.aabb = s.aabb;
 	sd.uv_scale = s.uv_scale;
 	for (uint32_t i = 0; i < s.lod_count; i++) {

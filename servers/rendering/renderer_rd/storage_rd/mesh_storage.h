@@ -126,6 +126,13 @@ private:
 			LOD *lods = nullptr;
 			uint32_t lod_count = 0;
 
+			// Virtual geometry: index_array covers only the leaf clusters, vg_index_array covers every level.
+			RID vg_cluster_buffer;
+			RID vg_index_array;
+			uint32_t vg_cluster_count = 0;
+			uint32_t vg_leaf_index_count = 0;
+			Vector<uint8_t> vg_cluster_data;
+
 			AABB aabb;
 
 			Vector<AABB> bone_aabbs;
@@ -501,6 +508,26 @@ public:
 			r_index_count = s->lods[current_lod].index_count;
 			return current_lod + 1;
 		}
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_vg_cluster_count(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_cluster_count;
+	}
+
+	_FORCE_INLINE_ RID mesh_surface_get_vg_cluster_buffer(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_cluster_buffer;
+	}
+
+	_FORCE_INLINE_ RID mesh_surface_get_vg_index_array(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_index_array;
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_vg_leaf_index_count(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_leaf_index_count;
+	}
+
+	_FORCE_INLINE_ const Vector<uint8_t> &mesh_surface_get_vg_cluster_data(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_cluster_data;
 	}
 
 	_FORCE_INLINE_ RID mesh_surface_get_index_array(void *p_surface, uint32_t p_lod) const {

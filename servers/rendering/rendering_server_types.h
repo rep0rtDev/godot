@@ -107,6 +107,11 @@ struct SurfaceData {
 
 	Vector4 uv_scale;
 
+	// Virtual geometry: packed VirtualGeometryCluster array. index_data then holds every
+	// cluster level, and the first vg_leaf_index_count indices are the full-detail mesh.
+	Vector<uint8_t> vg_cluster_data;
+	uint32_t vg_leaf_index_count = 0;
+
 	RID material;
 };
 

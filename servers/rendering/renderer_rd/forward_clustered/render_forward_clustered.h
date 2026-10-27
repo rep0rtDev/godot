@@ -37,6 +37,7 @@
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
+#include "servers/rendering/renderer_rd/effects/virtual_geometry_effect.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/best_fit_normal.glsl.gen.h"
@@ -564,6 +565,12 @@ private:
 		RID material_uniform_set_shadow;
 		SceneShaderForwardClustered::ShaderData *shader_shadow = nullptr;
 
+		// Virtual geometry: per-instance cluster selection results, drawn with one multi-draw-indirect.
+		RID vg_command_buffer;
+		RID vg_uniform_set;
+		uint32_t vg_cluster_count = 0;
+		uint64_t vg_last_pass = 0;
+
 		GeometryInstanceSurfaceDataCache *next = nullptr;
 		GeometryInstanceForwardClustered *owner = nullptr;
 		SelfList<GeometryInstanceSurfaceDataCache> compilation_dirty_element;
@@ -769,6 +776,11 @@ private:
 	RendererRD::MFXTemporalEffect *mfx_temporal_effect = nullptr;
 #endif
 	RendererRD::MotionVectorsStore *motion_vectors_store = nullptr;
+	RendererRD::VirtualGeometryEffect *virtual_geometry = nullptr;
+	uint64_t virtual_geometry_pass = 0;
+
+	void _virtual_geometry_select(const RenderDataRD *p_render_data);
+	void _geometry_instance_surface_free(GeometryInstanceSurfaceDataCache *p_surface);
 
 	/* Cluster builder */
 

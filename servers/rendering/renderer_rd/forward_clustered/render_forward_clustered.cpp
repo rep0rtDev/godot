@@ -548,7 +548,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		}
 
 		if (pipeline_valid) {
-			if (!emulate_point_size) {
+			const bool use_virtual_geometry = surf->vg_cluster_count > 0 && mesh_surface == surf->surface && !emulate_point_size;
+			if (use_virtual_geometry) {
+				index_array_rd = mesh_storage->mesh_surface_get_vg_index_array(mesh_surface);
+			} else if (!emulate_point_size) {
 				index_array_rd = mesh_storage->mesh_surface_get_index_array(mesh_surface, element_info.lod_index);
 			} else {
 				index_array_rd = RID();
@@ -617,6 +620,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					WARN_PRINT("Indirect draws are not supported when emulating point size.");
 				}
 				RD::get_singleton()->draw_list_draw(draw_list, false, mesh_storage->mesh_surface_get_vertex_count(mesh_surface), instance_count * 6);
+			} else if (use_virtual_geometry) {
+				// Camera-facing passes use the frustum-culled range; shadow and auxiliary passes the LOD-only range.
+				const bool camera_range = p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI;
+				const uint32_t offset = camera_range ? 0 : surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE;
+				RD::get_singleton()->draw_list_draw_indirect(draw_list, true, surf->vg_command_buffer, offset, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 			} else if (indirect) {
 				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
 			} else {
@@ -893,7 +901,7 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 
 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
 
-		const bool cant_repeat = instance_data.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid();
+		const bool cant_repeat = instance_data.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid() || surface->vg_cluster_count > 0;
 
 		if (prev_surface != nullptr && !cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && prev_surface->uses_lightmap_specular == surface->uses_lightmap_specular && inst->mirror == prev_surface->owner->mirror && repeats < RenderElementInfo::MAX_REPEATS) {
 			//this element is the same as the previous one, count repeats to draw it using instancing
@@ -2200,6 +2208,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
+
+	_virtual_geometry_select(p_render_data);
 
 	if (depth_pre_pass) { //depth pre pass
 		bool needs_pre_resolve = _needs_post_prepass_render(p_render_data, using_sdfgi || using_voxelgi);
@@ -4271,7 +4281,7 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_dirty() {
 
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
-		RenderForwardClustered::get_singleton()->geometry_instance_surface_alloc.free(surf);
+		RenderForwardClustered::get_singleton()->_geometry_instance_surface_free(surf);
 		surf = next;
 	}
 
@@ -4293,6 +4303,81 @@ void RenderForwardClustered::_update_global_pipeline_data_requirements_from_ligh
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	global_pipeline_data_required.use_shadow_cubemaps = light_storage->get_shadow_cubemaps_used();
 	global_pipeline_data_required.use_shadow_dual_paraboloid = light_storage->get_shadow_dual_paraboloid_used();
+}
+
+void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSurfaceDataCache *p_surface) {
+	if (p_surface->vg_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_uniform_set)) {
+		RD::get_singleton()->free_rid(p_surface->vg_uniform_set);
+	}
+	if (p_surface->vg_command_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(p_surface->vg_command_buffer);
+	}
+	geometry_instance_surface_alloc.free(p_surface);
+}
+
+void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data) {
+	if (!virtual_geometry) {
+		return;
+	}
+	virtual_geometry_pass++;
+
+	const Transform3D view = p_render_data->scene_data->cam_transform.affine_inverse();
+	const Projection &projection = p_render_data->scene_data->cam_projection;
+	float viewport_height = 512.0f;
+	if (p_render_data->render_buffers.is_valid()) {
+		viewport_height = p_render_data->render_buffers->get_internal_size().y;
+	}
+
+	RendererRD::VirtualGeometryEffect::PushConstant push_constant = {};
+	for (int c = 0; c < 4; c++) {
+		for (int r = 0; r < 4; r++) {
+			push_constant.projection[c * 4 + r] = projection.columns[c][r];
+		}
+	}
+	push_constant.lod_scale = viewport_height * 0.5f * Math::abs(projection.columns[1][1]) / MAX(virtual_geometry->get_pixel_error(), 0.01f);
+	push_constant.flags = p_render_data->scene_data->cam_orthogonal ? RendererRD::VirtualGeometryEffect::FLAG_ORTHOGONAL : 0;
+
+	RD::ComputeListID compute_list = 0;
+	bool compute_list_open = false;
+
+	auto select_instances = [&](const PagedArray<RenderGeometryInstance *> &p_instances) {
+		for (uint32_t i = 0; i < p_instances.size(); i++) {
+			GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>(p_instances[i]);
+			for (GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf; surf = surf->next) {
+				if (surf->vg_cluster_count == 0 || surf->vg_last_pass == virtual_geometry_pass) {
+					continue;
+				}
+				surf->vg_last_pass = virtual_geometry_pass;
+				if (!compute_list_open) {
+					compute_list = RD::get_singleton()->compute_list_begin();
+					RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline());
+					compute_list_open = true;
+				}
+				const Transform3D modelview = view * inst->transform;
+				for (int r = 0; r < 3; r++) {
+					push_constant.modelview[r * 4 + 0] = modelview.basis.rows[r][0];
+					push_constant.modelview[r * 4 + 1] = modelview.basis.rows[r][1];
+					push_constant.modelview[r * 4 + 2] = modelview.basis.rows[r][2];
+					push_constant.modelview[r * 4 + 3] = modelview.origin[r];
+				}
+				push_constant.cluster_count = surf->vg_cluster_count;
+				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_uniform_set, 0);
+				RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+				RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
+			}
+		}
+	};
+
+	if (p_render_data->instances) {
+		select_instances(*p_render_data->instances);
+	}
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		select_instances(p_render_data->render_shadows[i].instances);
+	}
+
+	if (compute_list_open) {
+		RD::get_singleton()->compute_list_end();
+	}
 }
 
 void RenderForwardClustered::_geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh) {
@@ -4382,6 +4467,13 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	sdcache->surface = mesh_storage->mesh_get_surface(p_mesh, p_surface);
 	sdcache->primitive = mesh_storage->mesh_surface_get_primitive(sdcache->surface);
 	sdcache->surface_index = p_surface;
+
+	const uint32_t vg_cluster_count = mesh_storage->mesh_surface_get_vg_cluster_count(sdcache->surface);
+	if (vg_cluster_count > 0 && virtual_geometry && ginstance->data->base_type == RSE::INSTANCE_MESH) {
+		sdcache->vg_command_buffer = virtual_geometry->create_command_buffer(mesh_storage->mesh_surface_get_vg_cluster_data(sdcache->surface), mesh_storage->mesh_surface_get_vg_leaf_index_count(sdcache->surface));
+		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(mesh_storage->mesh_surface_get_vg_cluster_buffer(sdcache->surface), sdcache->vg_command_buffer);
+		sdcache->vg_cluster_count = vg_cluster_count;
+	}
 
 	if (ginstance->data->dirty_dependencies) {
 		RSG::utilities->base_update_dependency(p_mesh, &ginstance->data->dependency_tracker);
@@ -5103,7 +5195,7 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 	GeometryInstanceSurfaceDataCache *surf = ginstance->surface_caches;
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
-		geometry_instance_surface_alloc.free(surf);
+		_geometry_instance_surface_free(surf);
 		surf = next;
 	}
 	memdelete(ginstance->data);
@@ -5393,11 +5485,16 @@ RenderForwardClustered::RenderForwardClustered() {
 	ss_effects = memnew(RendererRD::SSEffects);
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
+	virtual_geometry = memnew(RendererRD::VirtualGeometryEffect);
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
 #endif
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	if (virtual_geometry) {
+		memdelete(virtual_geometry);
+		virtual_geometry = nullptr;
+	}
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;

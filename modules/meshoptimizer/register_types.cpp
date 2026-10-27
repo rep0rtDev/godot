@@ -30,7 +30,10 @@
 
 #include "register_types.h"
 
+#include "virtual_geometry_builder.h"
+
 #include "scene/resources/surface_tool.h"
+#include "servers/rendering/virtual_geometry.h"
 
 #include <thirdparty/meshoptimizer/meshoptimizer.h>
 
@@ -48,6 +51,7 @@ void initialize_meshoptimizer_module(ModuleInitializationLevel p_level) {
 	SurfaceTool::remap_vertex_func = meshopt_remapVertexBuffer;
 	SurfaceTool::remap_index_func = meshopt_remapIndexBuffer;
 	SurfaceTool::generate_tangents_func = meshopt_generateTangents;
+	VirtualGeometry::build_func = virtual_geometry_build;
 }
 
 void uninitialize_meshoptimizer_module(ModuleInitializationLevel p_level) {
@@ -64,4 +68,5 @@ void uninitialize_meshoptimizer_module(ModuleInitializationLevel p_level) {
 	SurfaceTool::remap_vertex_func = nullptr;
 	SurfaceTool::remap_index_func = nullptr;
 	SurfaceTool::generate_tangents_func = nullptr;
+	VirtualGeometry::build_func = nullptr;
 }

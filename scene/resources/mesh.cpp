@@ -902,6 +902,7 @@ void Mesh::_bind_methods() {
 
 	BIND_BITFIELD_FLAG(ARRAY_FLAG_COMPRESS_ATTRIBUTES);
 	BIND_BITFIELD_FLAG(ARRAY_FLAG_USE_STORAGE_BUFFER);
+	BIND_BITFIELD_FLAG(ARRAY_FLAG_USE_VIRTUAL_GEOMETRY);
 
 	BIND_ENUM_CONSTANT(BLEND_SHAPE_MODE_NORMALIZED);
 	BIND_ENUM_CONSTANT(BLEND_SHAPE_MODE_RELATIVE);
@@ -1563,6 +1564,10 @@ Array ArrayMesh::_get_surfaces() const {
 			data["index_data"] = surface.index_data;
 			data["index_count"] = surface.index_count;
 		};
+		if (surface.vg_cluster_data.size()) {
+			data["vg_clusters"] = surface.vg_cluster_data;
+			data["vg_leaf_index_count"] = surface.vg_leaf_index_count;
+		}
 
 		Array lods;
 		for (int j = 0; j < surface.lods.size(); j++) {
@@ -1647,6 +1652,11 @@ void ArrayMesh::_set_surfaces(const Array &p_surfaces) {
 			ERR_FAIL_COND(!d.has("index_count"));
 			surface.index_data = d["index_data"];
 			surface.index_count = d["index_count"];
+		}
+
+		if (d.has("vg_clusters")) {
+			surface.vg_cluster_data = d["vg_clusters"];
+			surface.vg_leaf_index_count = d.get("vg_leaf_index_count", 0);
 		}
 
 		if (d.has("lods")) {
@@ -1809,7 +1819,7 @@ void ArrayMesh::_recompute_aabb() {
 }
 
 // TODO: Need to add binding to add_surface using future MeshSurfaceData object.
-void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_primitive, const Vector<uint8_t> &p_array, const Vector<uint8_t> &p_attribute_array, const Vector<uint8_t> &p_skin_array, int p_vertex_count, const Vector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<uint8_t> &p_blend_shape_data, const Vector<AABB> &p_bone_aabbs, const Vector<RenderingServerTypes::SurfaceData::LOD> &p_lods, const Vector4 p_uv_scale) {
+void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_primitive, const Vector<uint8_t> &p_array, const Vector<uint8_t> &p_attribute_array, const Vector<uint8_t> &p_skin_array, int p_vertex_count, const Vector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<uint8_t> &p_blend_shape_data, const Vector<AABB> &p_bone_aabbs, const Vector<RenderingServerTypes::SurfaceData::LOD> &p_lods, const Vector4 p_uv_scale, const Vector<uint8_t> &p_vg_cluster_data, uint32_t p_vg_leaf_index_count) {
 	ERR_FAIL_COND(surfaces.size() == RSE::MAX_MESH_SURFACES);
 	_create_if_empty();
 
@@ -1838,6 +1848,8 @@ void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_prim
 	sd.bone_aabbs = p_bone_aabbs;
 	sd.lods = p_lods;
 	sd.uv_scale = p_uv_scale;
+	sd.vg_cluster_data = p_vg_cluster_data;
+	sd.vg_leaf_index_count = p_vg_leaf_index_count;
 
 	RenderingServer::get_singleton()->mesh_add_surface(mesh, sd);
 
@@ -1865,7 +1877,7 @@ void ArrayMesh::add_surface_from_arrays(PrimitiveType p_primitive, const Array &
 	print_line("primitive: " + itos(surface.primitive));
 	*/
 
-	add_surface(surface.format, PrimitiveType(surface.primitive), surface.vertex_data, surface.attribute_data, surface.skin_data, surface.vertex_count, surface.index_data, surface.index_count, surface.aabb, surface.blend_shape_data, surface.bone_aabbs, surface.lods, surface.uv_scale);
+	add_surface(surface.format, PrimitiveType(surface.primitive), surface.vertex_data, surface.attribute_data, surface.skin_data, surface.vertex_count, surface.index_data, surface.index_count, surface.aabb, surface.blend_shape_data, surface.bone_aabbs, surface.lods, surface.uv_scale, surface.vg_cluster_data, surface.vg_leaf_index_count);
 }
 
 Array ArrayMesh::surface_get_arrays(int p_surface) const {

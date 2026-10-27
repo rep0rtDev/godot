@@ -87,6 +87,8 @@ struct Mesh {
 
 		GLuint index_buffer = 0;
 		uint32_t index_count = 0;
+		uint32_t vg_total_index_count = 0;
+		Vector<uint8_t> vg_cluster_data;
 		uint32_t index_buffer_size = 0;
 
 		struct Wireframe {

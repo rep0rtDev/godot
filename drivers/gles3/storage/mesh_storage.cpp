@@ -270,6 +270,12 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0); //unbind
 		s->index_count = new_surface.index_count;
 		s->index_buffer_size = new_surface.index_data.size();
+		if (new_surface.vg_leaf_index_count > 0 && new_surface.vg_leaf_index_count <= new_surface.index_count) {
+			// Compatibility has no GPU cluster selection: draw the full-detail leaf range only.
+			s->vg_cluster_data = new_surface.vg_cluster_data;
+			s->vg_total_index_count = new_surface.index_count;
+			s->index_count = new_surface.vg_leaf_index_count;
+		}
 
 		if (new_surface.lods.size()) {
 			s->lods = memnew_arr(Mesh::Surface::LOD, new_surface.lods.size());
@@ -641,7 +647,11 @@ RenderingServerTypes::SurfaceData MeshStorage::mesh_get_surface(RID p_mesh, int 
 	}
 
 	sd.vertex_count = s.vertex_count;
-	sd.index_count = s.index_count;
+	sd.index_count = s.vg_total_index_count ? s.vg_total_index_count : s.index_count;
+	if (s.vg_total_index_count) {
+		sd.vg_cluster_data = s.vg_cluster_data;
+		sd.vg_leaf_index_count = s.index_count;
+	}
 	sd.primitive = s.primitive;
 
 	if (sd.index_count) {

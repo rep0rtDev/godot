@@ -25,6 +25,7 @@ env.add_source_files(env.servers_sources, "shader_language.cpp")
 env.add_source_files(env.servers_sources, "shader_preprocessor.cpp")
 env.add_source_files(env.servers_sources, "shader_types.cpp")
 env.add_source_files(env.servers_sources, "shader_warnings.cpp")
+env.add_source_files(env.servers_sources, "virtual_geometry.cpp")
 
 if env["rendering_device"]:
     env.add_source_files(env.servers_sources, "rendering_device.cpp")
