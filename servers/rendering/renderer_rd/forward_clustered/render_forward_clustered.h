@@ -240,6 +240,8 @@ private:
 		bool use_directional_soft_shadow = false;
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
 		bool use_material_feedback = false;
+		// Virtual geometry camera ranges: 0 = early and late, 1 = early only (first depth pass), 2 = late only.
+		uint32_t vg_phase = 0;
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -567,6 +569,7 @@ private:
 
 		// Virtual geometry: per-instance cluster selection results, drawn with one multi-draw-indirect.
 		RID vg_command_buffer;
+		RID vg_visibility_buffer;
 		RID vg_uniform_set;
 		uint32_t vg_cluster_count = 0;
 		uint64_t vg_last_pass = 0;
@@ -779,8 +782,14 @@ private:
 	RendererRD::VirtualGeometryEffect *virtual_geometry = nullptr;
 	uint64_t virtual_geometry_pass = 0;
 	LocalVector<GeometryInstanceSurfaceDataCache *> virtual_geometry_surfaces;
+	uint32_t virtual_geometry_camera_surface_count = 0;
+	Transform3D virtual_geometry_view;
+	RendererRD::VirtualGeometryEffect::PushConstant virtual_geometry_push_constant = {};
+	LocalVector<GeometryInstanceSurfaceDataCache *> virtual_geometry_late_elements;
+	LocalVector<RenderElementInfo> virtual_geometry_late_element_info;
 
-	void _virtual_geometry_select(const RenderDataRD *p_render_data);
+	void _virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion);
+	bool _virtual_geometry_occlusion(const RenderDataRD *p_render_data);
 	void _geometry_instance_surface_free(GeometryInstanceSurfaceDataCache *p_surface);
 
 	/* Cluster builder */

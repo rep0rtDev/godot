@@ -1,6 +1,6 @@
 extends SceneTree
 # Benchmark: N instances of a dense mesh, regular vs virtual geometry.
-# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300
+# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1]
 # Prints average CPU frame time and GPU render time reported by the RenderingServer.
 
 var frames := 300
@@ -34,6 +34,14 @@ func _init() -> void:
 		mi.mesh = mesh
 		mi.position = Vector3((i % side) * 3.0, 0, -(i / side) * 3.0)
 		root.add_child(mi)
+	if arg("wall", "0") == "1":
+		# Opaque occluder in front of the grid, leaving only its right edge visible, for occlusion culling checks.
+		var wall := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = Vector3(side * 2.25, 12, 0.3)
+		wall.mesh = box
+		wall.position = Vector3((side - 1) * 1.5 - side * 0.375, 2, 3)
+		root.add_child(wall)
 	var light := DirectionalLight3D.new()
 	light.shadow_enabled = arg("shadows", "1") == "1"
 	light.rotation_degrees = Vector3(-50, 30, 0)

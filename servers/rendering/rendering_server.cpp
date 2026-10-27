@@ -3742,6 +3742,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/limits/time/time_rollover_secs", PROPERTY_HINT_RANGE, "1,10000,1,or_greater,suffix:s"), 3600);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/virtual_geometry/pixel_error", PROPERTY_HINT_RANGE, "0.1,16,0.01"), 1.0);
 	GLOBAL_DEF("rendering/virtual_geometry/debug/collect_statistics", false);
+	GLOBAL_DEF("rendering/virtual_geometry/occlusion_culling", true);
 
 	GLOBAL_DEF_RST("rendering/lights_and_shadows/use_physical_light_units", false);
 

@@ -31,7 +31,9 @@
 #pragma once
 
 #include "core/templates/safe_refcount.h"
+#include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_hzb.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_select.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/rendering_device.h"
 
 namespace RendererRD {
@@ -43,7 +45,9 @@ public:
 	static constexpr uint32_t FLAG_ORTHOGONAL = 1;
 	static constexpr uint32_t FLAG_COMPACT = 2;
 	static constexpr uint32_t FLAG_STATS = 4;
-	// Two uint draw counts (camera, shadow) padded to 16 bytes, followed by the command ranges.
+	static constexpr uint32_t FLAG_OCCLUSION_PHASE1 = 8;
+	static constexpr uint32_t FLAG_FLIP_Y = 16;
+	// Draw counts (camera, shadow, late camera) padded to 16 bytes, followed by the three command ranges.
 	static constexpr uint32_t HEADER_SIZE = 16;
 
 	struct PushConstant {
@@ -68,7 +72,16 @@ public:
 private:
 	VirtualGeometrySelectShaderRD shader;
 	RID shader_version;
-	RID pipeline;
+	RID pipelines[2];
+
+	struct HzbPushConstant {
+		int32_t source_size[2];
+		int32_t dest_size[2];
+	};
+	VirtualGeometryHzbShaderRD hzb_shader;
+	RID hzb_shader_version;
+	RID hzb_pipelines[2];
+	bool occlusion_culling = true;
 	float pixel_error = 1.0f;
 	bool use_indirect_count = false;
 
@@ -82,8 +95,14 @@ public:
 	VirtualGeometryEffect();
 	~VirtualGeometryEffect();
 
-	RID get_shader() const;
-	RID get_pipeline() const { return pipeline; }
+	RID get_shader(bool p_occlusion = false) const;
+	RID get_pipeline(bool p_occlusion = false) const { return pipelines[p_occlusion ? 1 : 0]; }
+	bool uses_occlusion_culling() const { return occlusion_culling && use_indirect_count; }
+
+	// Builds the reversed-Z depth pyramid for p_depth and returns it, sized to the largest power of two that fits.
+	RID build_hzb(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_depth);
+	RID get_occlusion_uniform_set(RID p_hzb);
+	RID create_visibility_buffer(uint32_t p_cluster_count) const;
 	float get_pixel_error() const { return pixel_error; }
 	bool uses_indirect_count() const { return use_indirect_count; }
 	bool collects_stats() const { return collect_stats; }
@@ -94,7 +113,7 @@ public:
 
 	// Command buffer with a count header and two draw ranges (camera and shadow); both start as the full-detail leaf clusters.
 	RID create_command_buffer(const Vector<uint8_t> &p_cluster_data, uint32_t p_leaf_index_count) const;
-	RID create_uniform_set(RID p_cluster_buffer, RID p_command_buffer) const;
+	RID create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer) const;
 };
 
 } // namespace RendererRD

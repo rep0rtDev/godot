@@ -3596,6 +3596,9 @@
 		<member name="rendering/virtual_geometry/debug/collect_statistics" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], the GPU counts the virtual geometry clusters and triangles it selects each frame. Read them with [method RenderingServer.get_rendering_info] and [constant RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME]. Adds atomic operations to the selection pass, so leave it disabled outside of profiling.
 		</member>
+		<member name="rendering/virtual_geometry/occlusion_culling" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], virtual geometry clusters hidden behind other opaque geometry are culled on the GPU. Clusters visible in the previous frame are drawn first, a hierarchical depth buffer is built from them, and the remaining clusters are tested against it and drawn when visible. Requires the depth prepass, indirect count draws, a single view and no MSAA; otherwise only frustum culling is used.
+		</member>
 		<member name="rendering/virtual_geometry/pixel_error" type="float" setter="" getter="" default="1.0">
 			Maximum projected simplification error, in pixels, allowed when the renderer selects levels of detail for meshes using [constant Mesh.ARRAY_FLAG_USE_VIRTUAL_GEOMETRY]. Lower values keep more detail at the cost of more triangles.
 		</member>

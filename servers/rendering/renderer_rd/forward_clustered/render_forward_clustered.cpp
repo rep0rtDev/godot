@@ -624,9 +624,16 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			} else if (use_virtual_geometry) {
 				// Camera-facing passes use the frustum-culled range; shadow and auxiliary passes the LOD-only range.
 				const bool camera_range = p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI;
-				const uint32_t offset = RendererRD::VirtualGeometryEffect::HEADER_SIZE + (camera_range ? 0 : surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+				const uint32_t range_size = surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE;
+				const uint32_t offset = RendererRD::VirtualGeometryEffect::HEADER_SIZE + (camera_range ? 0 : range_size);
 				if (virtual_geometry->uses_indirect_count()) {
-					RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t), surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+					// Camera ranges: early clusters (visible last frame) and late clusters (found by the occlusion pass).
+					if (!camera_range || p_params->vg_phase != 2) {
+						RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t), surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+					}
+					if (camera_range && p_params->vg_phase != 1) {
+						RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + 2 * range_size, surf->vg_command_buffer, sizeof(uint32_t) * 2, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+					}
 				} else {
 					RD::get_singleton()->draw_list_draw_indirect(draw_list, true, surf->vg_command_buffer, offset, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 				}
@@ -2214,7 +2221,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
 
-	_virtual_geometry_select(p_render_data);
+	const bool vg_occlusion = virtual_geometry && virtual_geometry->uses_occlusion_culling() && depth_pre_pass && !use_msaa && rb.is_valid() && p_render_data->scene_data->view_count == 1 && !is_reflection_probe && !p_render_data->scene_data->cam_orthogonal;
+	_virtual_geometry_select(p_render_data, vg_occlusion);
 
 	if (depth_pre_pass) { //depth pre pass
 		bool needs_pre_resolve = _needs_post_prepass_render(p_render_data, using_sdfgi || using_voxelgi);
@@ -2237,6 +2245,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+		render_list_params.vg_phase = vg_occlusion ? 1 : 0;
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();
@@ -2253,6 +2262,27 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
 				}
 			}
+			RD::get_singleton()->draw_command_end_label();
+		}
+	}
+
+	if (vg_occlusion && _virtual_geometry_occlusion(p_render_data)) {
+		// Clusters that were hidden last frame but pass the test against this frame's depth pyramid.
+		virtual_geometry_late_elements.clear();
+		virtual_geometry_late_element_info.clear();
+		const RenderList &opaque_list = render_list[RENDER_LIST_OPAQUE];
+		for (uint32_t i = 0; i < opaque_list.elements.size(); i++) {
+			if (opaque_list.elements[i]->vg_cluster_count > 0) {
+				virtual_geometry_late_elements.push_back(opaque_list.elements[i]);
+				virtual_geometry_late_element_info.push_back(opaque_list.element_info[i]);
+			}
+		}
+		if (!virtual_geometry_late_elements.is_empty()) {
+			RD::get_singleton()->draw_command_begin_label("Render Virtual Geometry Late Depth");
+			RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index);
+			RenderListParameters late_params(virtual_geometry_late_elements.ptr(), virtual_geometry_late_element_info.ptr(), virtual_geometry_late_elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+			late_params.vg_phase = 2;
+			_render_list_with_draw_list(&late_params, depth_framebuffer, RD::DRAW_DEFAULT_ALL, depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 			RD::get_singleton()->draw_command_end_label();
 		}
 	}
@@ -4314,13 +4344,18 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 	if (p_surface->vg_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_uniform_set)) {
 		RD::get_singleton()->free_rid(p_surface->vg_uniform_set);
 	}
+	if (p_surface->vg_visibility_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(p_surface->vg_visibility_buffer);
+		p_surface->vg_visibility_buffer = RID();
+	}
 	if (p_surface->vg_command_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_surface->vg_command_buffer);
 	}
 	geometry_instance_surface_alloc.free(p_surface);
 }
 
-void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data) {
+void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion) {
+	virtual_geometry_camera_surface_count = 0;
 	if (!virtual_geometry) {
 		return;
 	}
@@ -4346,6 +4381,13 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_COMPACT;
 	}
 
+	if (p_occlusion) {
+		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_OCCLUSION_PHASE1;
+	}
+	if (p_render_data->scene_data->flip_y) {
+		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_FLIP_Y;
+	}
+
 	if (virtual_geometry->collects_stats()) {
 		virtual_geometry->begin_frame_stats(Engine::get_singleton()->get_frames_drawn() + 1);
 		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_STATS;
@@ -4368,6 +4410,9 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 	if (p_render_data->instances) {
 		gather_instances(*p_render_data->instances);
 	}
+	virtual_geometry_camera_surface_count = virtual_geometry_surfaces.size();
+	virtual_geometry_view = view;
+	virtual_geometry_push_constant = push_constant;
 	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 		gather_instances(p_render_data->render_shadows[i].instances);
 	}
@@ -4401,6 +4446,38 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 		}
 	}
 	RD::get_singleton()->compute_list_end();
+}
+
+bool RenderForwardClustered::_virtual_geometry_occlusion(const RenderDataRD *p_render_data) {
+	if (virtual_geometry_camera_surface_count == 0) {
+		return false;
+	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	RID hzb = virtual_geometry->build_hzb(rb, rb->get_depth_texture(0));
+	RID occlusion_uniform_set = virtual_geometry->get_occlusion_uniform_set(hzb);
+
+	RendererRD::VirtualGeometryEffect::PushConstant push_constant = virtual_geometry_push_constant;
+	push_constant.flags &= ~RendererRD::VirtualGeometryEffect::FLAG_OCCLUSION_PHASE1;
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline(true));
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, occlusion_uniform_set, 1);
+	for (uint32_t i = 0; i < virtual_geometry_camera_surface_count; i++) {
+		GeometryInstanceSurfaceDataCache *surf = virtual_geometry_surfaces[i];
+		const Transform3D modelview = virtual_geometry_view * surf->owner->transform;
+		for (int r = 0; r < 3; r++) {
+			push_constant.modelview[r * 4 + 0] = modelview.basis.rows[r][0];
+			push_constant.modelview[r * 4 + 1] = modelview.basis.rows[r][1];
+			push_constant.modelview[r * 4 + 2] = modelview.basis.rows[r][2];
+			push_constant.modelview[r * 4 + 3] = modelview.origin[r];
+		}
+		push_constant.cluster_count = surf->vg_cluster_count;
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
+	}
+	RD::get_singleton()->compute_list_end();
+	return true;
 }
 
 void RenderForwardClustered::_geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh) {
@@ -4494,7 +4571,8 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	const uint32_t vg_cluster_count = mesh_storage->mesh_surface_get_vg_cluster_count(sdcache->surface);
 	if (vg_cluster_count > 0 && virtual_geometry && ginstance->data->base_type == RSE::INSTANCE_MESH) {
 		sdcache->vg_command_buffer = virtual_geometry->create_command_buffer(mesh_storage->mesh_surface_get_vg_cluster_data(sdcache->surface), mesh_storage->mesh_surface_get_vg_leaf_index_count(sdcache->surface));
-		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(mesh_storage->mesh_surface_get_vg_cluster_buffer(sdcache->surface), sdcache->vg_command_buffer);
+		sdcache->vg_visibility_buffer = virtual_geometry->create_visibility_buffer(vg_cluster_count);
+		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(mesh_storage->mesh_surface_get_vg_cluster_buffer(sdcache->surface), sdcache->vg_command_buffer, sdcache->vg_visibility_buffer);
 		sdcache->vg_cluster_count = vg_cluster_count;
 	}
 

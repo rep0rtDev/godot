@@ -32,6 +32,8 @@
 
 #include "core/config/project_settings.h"
 #include "core/object/callable_mp.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/virtual_geometry.h"
 
 using namespace RendererRD;
@@ -67,20 +69,100 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 	zero.resize_initialized(sizeof(uint32_t) * STAT_MAX);
 	stats_buffer = RD::get_singleton()->storage_buffer_create(zero.size(), zero);
 
+	occlusion_culling = GLOBAL_GET("rendering/virtual_geometry/occlusion_culling");
+
 	Vector<String> modes;
 	modes.push_back("");
+	modes.push_back("\n#define MODE_OCCLUSION\n");
 	shader.initialize(modes);
 	shader_version = shader.version_create();
-	pipeline = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, 0));
+	for (int i = 0; i < 2; i++) {
+		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
+	}
+
+	Vector<String> hzb_modes;
+	hzb_modes.push_back("\n#define MODE_FROM_DEPTH\n");
+	hzb_modes.push_back("");
+	hzb_shader.initialize(hzb_modes);
+	hzb_shader_version = hzb_shader.version_create();
+	for (int i = 0; i < 2; i++) {
+		hzb_pipelines[i] = RD::get_singleton()->compute_pipeline_create(hzb_shader.version_get_shader(hzb_shader_version, i));
+	}
+}
+
+RID VirtualGeometryEffect::build_hzb(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_depth) {
+	static const StringName context = SNAME("VirtualGeometry");
+	static const StringName name = SNAME("hzb");
+
+	const Size2i depth_size = p_render_buffers->get_internal_size();
+	Size2i hzb_size(1, 1);
+	while (hzb_size.x * 2 <= depth_size.x) {
+		hzb_size.x *= 2;
+	}
+	while (hzb_size.y * 2 <= depth_size.y) {
+		hzb_size.y *= 2;
+	}
+	uint32_t mipmaps = 1;
+	while ((MAX(hzb_size.x, hzb_size.y) >> mipmaps) > 0) {
+		mipmaps++;
+	}
+	if (!p_render_buffers->has_texture(context, name)) {
+		p_render_buffers->create_texture(context, name, RD::DATA_FORMAT_R32_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, hzb_size, 1, mipmaps);
+	}
+
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	Size2i source_size = depth_size;
+	for (uint32_t mip = 0; mip < mipmaps; mip++) {
+		const Size2i dest_size(MAX(hzb_size.x >> mip, 1), MAX(hzb_size.y >> mip, 1));
+		const int mode = mip == 0 ? 0 : 1;
+		RID shader_rid = hzb_shader.version_get_shader(hzb_shader_version, mode);
+		RD::Uniform u_source;
+		if (mip == 0) {
+			u_source = RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_depth }));
+		} else {
+			u_source = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 0, Vector<RID>({ p_render_buffers->get_texture_slice(context, name, 0, mip - 1) }));
+		}
+		RD::Uniform u_dest(RD::UNIFORM_TYPE_IMAGE, 0, Vector<RID>({ p_render_buffers->get_texture_slice(context, name, 0, mip) }));
+
+		HzbPushConstant push_constant = { { source_size.x, source_size.y }, { dest_size.x, dest_size.y } };
+		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, hzb_pipelines[mode]);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader_rid, 0, u_source), 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader_rid, 1, u_dest), 1);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(dest_size.x, 8), Math::division_round_up(dest_size.y, 8), 1);
+		if (mip + 1 < mipmaps) {
+			RD::get_singleton()->compute_list_add_barrier(compute_list);
+		}
+		source_size = dest_size;
+	}
+	RD::get_singleton()->compute_list_end();
+
+	return p_render_buffers->get_texture(context, name);
+}
+
+RID VirtualGeometryEffect::get_occlusion_uniform_set(RID p_hzb) {
+	RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::Uniform u_hzb(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_hzb }));
+	return UniformSetCacheRD::get_singleton()->get_cache(get_shader(true), 1, u_hzb);
+}
+
+RID VirtualGeometryEffect::create_visibility_buffer(uint32_t p_cluster_count) const {
+	Vector<uint8_t> zero;
+	zero.resize_initialized(sizeof(uint32_t) * MAX(p_cluster_count, 1u));
+	return RD::get_singleton()->storage_buffer_create(zero.size(), zero);
 }
 
 VirtualGeometryEffect::~VirtualGeometryEffect() {
+	hzb_shader.version_free(hzb_shader_version);
 	RD::get_singleton()->free_rid(stats_buffer);
 	shader.version_free(shader_version);
 }
 
-RID VirtualGeometryEffect::get_shader() const {
-	return const_cast<VirtualGeometrySelectShaderRD &>(shader).version_get_shader(shader_version, 0);
+RID VirtualGeometryEffect::get_shader(bool p_occlusion) const {
+	return const_cast<VirtualGeometrySelectShaderRD &>(shader).version_get_shader(shader_version, p_occlusion ? 1 : 0);
 }
 
 RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluster_data, uint32_t p_leaf_index_count) const {
@@ -89,7 +171,7 @@ RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluste
 
 	// Leaves are packed first so the initial contents are valid for both the compacted and the per-slot layout.
 	Vector<uint8_t> data;
-	data.resize(HEADER_SIZE + cluster_count * 2 * COMMAND_STRIDE);
+	data.resize(HEADER_SIZE + cluster_count * 3 * COMMAND_STRIDE);
 	memset(data.ptrw(), 0, data.size());
 	uint32_t *header = reinterpret_cast<uint32_t *>(data.ptrw());
 	uint32_t *w = reinterpret_cast<uint32_t *>(data.ptrw() + HEADER_SIZE);
@@ -111,7 +193,7 @@ RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluste
 	return RD::get_singleton()->storage_buffer_create(data.size(), data, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 }
 
-RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_command_buffer) const {
+RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer) const {
 	Vector<RD::Uniform> uniforms;
 	{
 		RD::Uniform u;
@@ -132,6 +214,13 @@ RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_comman
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 		u.binding = 2;
 		u.append_id(stats_buffer);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.binding = 3;
+		u.append_id(p_visibility_buffer);
 		uniforms.push_back(u);
 	}
 	return RD::get_singleton()->uniform_set_create(uniforms, get_shader(), 0);
