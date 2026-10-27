@@ -574,6 +574,7 @@ private:
 		// Hierarchical traversal (compact draws only): per-instance queue and candidate list.
 		RID vg_work_buffer;
 		RID vg_traverse_uniform_set;
+		RID vg_instance_uniform_set;
 		uint32_t vg_node_count = 0;
 		uint32_t vg_cluster_count = 0;
 		uint64_t vg_last_pass = 0;

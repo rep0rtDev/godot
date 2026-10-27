@@ -4348,6 +4348,10 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 		RD::get_singleton()->free_rid(p_surface->vg_traverse_uniform_set);
 	}
 	p_surface->vg_traverse_uniform_set = RID();
+	if (p_surface->vg_instance_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_instance_uniform_set)) {
+		RD::get_singleton()->free_rid(p_surface->vg_instance_uniform_set);
+	}
+	p_surface->vg_instance_uniform_set = RID();
 	if (p_surface->vg_work_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_surface->vg_work_buffer);
 		p_surface->vg_work_buffer = RID();
@@ -4501,6 +4505,26 @@ bool RenderForwardClustered::_virtual_geometry_occlusion(const RenderDataRD *p_r
 	push_constant.flags &= ~RendererRD::VirtualGeometryEffect::FLAG_OCCLUSION_PHASE1;
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	// Whole instances first: a rejected one zeroes its indirect dispatch so none of its clusters get tested.
+	bool instances_tested = false;
+	for (uint32_t i = 0; i < virtual_geometry_camera_surface_count; i++) {
+		GeometryInstanceSurfaceDataCache *surf = virtual_geometry_surfaces[i];
+		if (!surf->vg_instance_uniform_set.is_valid()) {
+			continue;
+		}
+		if (!instances_tested) {
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_instance_occlusion_pipeline());
+			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, virtual_geometry->get_occlusion_uniform_set(hzb, RendererRD::VirtualGeometryEffect::MODE_INSTANCE_OCCLUSION), 1);
+			instances_tested = true;
+		}
+		_virtual_geometry_fill_push_constant(push_constant, virtual_geometry_view, surf);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_instance_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		RD::get_singleton()->compute_list_dispatch(compute_list, 1, 1, 1);
+	}
+	if (instances_tested) {
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+	}
 	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline(true));
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, occlusion_uniform_set, 1);
 	for (uint32_t i = 0; i < virtual_geometry_camera_surface_count; i++) {
@@ -4613,6 +4637,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer);
 		if (virtual_geometry->uses_indirect_count() && vg_node_count > 0) {
 			sdcache->vg_traverse_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_TRAVERSE);
+			sdcache->vg_instance_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_INSTANCE_OCCLUSION);
 			sdcache->vg_node_count = vg_node_count;
 		}
 		sdcache->vg_cluster_count = vg_cluster_count;

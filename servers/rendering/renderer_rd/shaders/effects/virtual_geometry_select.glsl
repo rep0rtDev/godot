@@ -70,8 +70,10 @@ layout(set = 0, binding = 4, std430) restrict readonly buffer Nodes {
 nodes;
 
 // [0..2]: indirect dispatch size for the candidate pass, [3]: candidate count,
+// [4]: 1 when the whole instance failed the camera frustum or occlusion test in last frame's phase two,
+// [5]: the value of [4] seen by this frame's phase one, [6..7]: unused,
 // then the traversal queue (node_count entries) and the candidate cluster ids (cluster_count entries).
-#define WORK_HEADER 4u
+#define WORK_HEADER 8u
 layout(set = 0, binding = 5, std430) restrict coherent buffer Work {
 	uint data[];
 }
@@ -204,6 +206,12 @@ void main() {
 		queue_tail = 1u;
 		work.data[3] = 0u;
 		work.data[WORK_HEADER] = 0u;
+		if ((params.flags & FLAG_OCCLUSION_PHASE1) != 0u) {
+			work.data[5] = work.data[4];
+		} else {
+			work.data[4] = 0u;
+			work.data[5] = 0u;
+		}
 	}
 
 	while (true) {
@@ -245,6 +253,25 @@ void main() {
 	}
 }
 
+#elif defined(MODE_INSTANCE)
+
+// Phase two instance test against the root bounds. A rejected instance skips the per-cluster occlusion pass;
+// its per-cluster visibility goes stale, so the next frame's phase one draws none of its clusters for the
+// camera and its phase two treats every cluster as not yet drawn.
+void main() {
+	if (gl_LocalInvocationID.x != 0u) {
+		return;
+	}
+	vec4 sphere = nodes.data[0].cull_sphere;
+	vec3 center = to_view(sphere.xyz);
+	float radius = sphere.w * instance_scale();
+	bool rejected = !in_frustum(center, radius) || is_occluded(center, radius);
+	work.data[4] = rejected ? 1u : 0u;
+	if (rejected) {
+		work.data[0] = 0u;
+	}
+}
+
 #else
 
 void main() {
@@ -267,7 +294,8 @@ void main() {
 
 #ifdef MODE_OCCLUSION
 	bool now_visible = visible && !is_occluded(to_view(c.cull_sphere.xyz), c.cull_sphere.w * scale);
-	if (now_visible && visibility.data[index] == 0u) {
+	bool drawn_early = visibility.data[index] != 0u && ((params.flags & FLAG_HIERARCHY) == 0u || work.data[5] == 0u);
+	if (now_visible && !drawn_early) {
 		DrawIndexedCommand late;
 		late.index_count = c.index_count;
 		late.instance_count = 1u;
@@ -283,7 +311,7 @@ void main() {
 	visibility.data[index] = now_visible ? 1u : 0u;
 	return;
 #else
-	if ((params.flags & FLAG_OCCLUSION_PHASE1) != 0u && visibility.data[index] == 0u) {
+	if ((params.flags & FLAG_OCCLUSION_PHASE1) != 0u && (visibility.data[index] == 0u || ((params.flags & FLAG_HIERARCHY) != 0u && work.data[5] != 0u))) {
 		visible = false;
 	}
 #endif
@@ -321,4 +349,4 @@ void main() {
 	}
 }
 
-#endif // MODE_TRAVERSE
+#endif

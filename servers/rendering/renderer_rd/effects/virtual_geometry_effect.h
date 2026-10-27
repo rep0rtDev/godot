@@ -49,12 +49,13 @@ public:
 	static constexpr uint32_t FLAG_FLIP_Y = 16;
 	static constexpr uint32_t FLAG_HIERARCHY = 32;
 	// Indirect dispatch size and candidate count of the hierarchical traversal, see create_work_buffer().
-	static constexpr uint32_t WORK_HEADER_SIZE = 16;
+	static constexpr uint32_t WORK_HEADER_SIZE = 32;
 
 	enum ShaderMode {
 		MODE_SELECT,
 		MODE_OCCLUSION,
 		MODE_TRAVERSE,
+		MODE_INSTANCE_OCCLUSION,
 		MODE_MAX,
 	};
 	// Draw counts (camera, shadow, late camera) padded to 16 bytes, followed by the three command ranges.
@@ -108,11 +109,12 @@ public:
 	RID get_shader(ShaderMode p_mode = MODE_SELECT) const;
 	RID get_pipeline(bool p_occlusion = false) const { return pipelines[p_occlusion ? MODE_OCCLUSION : MODE_SELECT]; }
 	RID get_traverse_pipeline() const { return pipelines[MODE_TRAVERSE]; }
+	RID get_instance_occlusion_pipeline() const { return pipelines[MODE_INSTANCE_OCCLUSION]; }
 	bool uses_occlusion_culling() const { return occlusion_culling && use_indirect_count; }
 
 	// Builds the reversed-Z depth pyramid for p_depth and returns it, sized to the largest power of two that fits.
 	RID build_hzb(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_depth);
-	RID get_occlusion_uniform_set(RID p_hzb);
+	RID get_occlusion_uniform_set(RID p_hzb, ShaderMode p_mode = MODE_OCCLUSION);
 	RID create_visibility_buffer(uint32_t p_cluster_count) const;
 	float get_pixel_error() const { return pixel_error; }
 	bool uses_indirect_count() const { return use_indirect_count; }

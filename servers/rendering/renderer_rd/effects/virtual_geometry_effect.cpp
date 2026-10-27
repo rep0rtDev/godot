@@ -75,6 +75,7 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 	modes.push_back("");
 	modes.push_back("\n#define MODE_OCCLUSION\n");
 	modes.push_back("\n#define MODE_TRAVERSE\n");
+	modes.push_back("\n#define MODE_INSTANCE\n#define MODE_OCCLUSION\n");
 	shader.initialize(modes);
 	shader_version = shader.version_create();
 	for (int i = 0; i < MODE_MAX; i++) {
@@ -144,10 +145,10 @@ RID VirtualGeometryEffect::build_hzb(Ref<RenderSceneBuffersRD> p_render_buffers,
 	return p_render_buffers->get_texture(context, name);
 }
 
-RID VirtualGeometryEffect::get_occlusion_uniform_set(RID p_hzb) {
+RID VirtualGeometryEffect::get_occlusion_uniform_set(RID p_hzb, ShaderMode p_mode) {
 	RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RD::Uniform u_hzb(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_hzb }));
-	return UniformSetCacheRD::get_singleton()->get_cache(get_shader(MODE_OCCLUSION), 1, u_hzb);
+	return UniformSetCacheRD::get_singleton()->get_cache(get_shader(p_mode), 1, u_hzb);
 }
 
 RID VirtualGeometryEffect::create_visibility_buffer(uint32_t p_cluster_count) const {

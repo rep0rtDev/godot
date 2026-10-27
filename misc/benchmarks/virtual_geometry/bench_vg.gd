@@ -1,12 +1,15 @@
 extends SceneTree
 # Benchmark: N instances of a dense mesh, regular vs virtual geometry.
-# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1]
+# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1 [--wall_off=<frame>]]
+# --wall_off hides the occluder at the given frame, so the final frame checks that newly revealed geometry appears.
 # Prints average CPU frame time and GPU render time reported by the RenderingServer.
 
 var frames := 300
 var warmup := 30
 var frame := 0
 var cam: Camera3D
+var wall: MeshInstance3D
+var wall_off := -1
 var times := PackedFloat64Array()
 var gpu_times := PackedFloat64Array()
 var last := 0
@@ -36,12 +39,13 @@ func _init() -> void:
 		root.add_child(mi)
 	if arg("wall", "0") == "1":
 		# Opaque occluder in front of the grid, leaving only its right edge visible, for occlusion culling checks.
-		var wall := MeshInstance3D.new()
+		wall = MeshInstance3D.new()
 		var box := BoxMesh.new()
 		box.size = Vector3(side * 2.25, 12, 0.3)
 		wall.mesh = box
 		wall.position = Vector3((side - 1) * 1.5 - side * 0.375, 2, 3)
 		root.add_child(wall)
+	wall_off = int(arg("wall_off", "-1"))
 	var light := DirectionalLight3D.new()
 	light.shadow_enabled = arg("shadows", "1") == "1"
 	light.rotation_degrees = Vector3(-50, 30, 0)
@@ -58,6 +62,8 @@ func _init() -> void:
 
 func _process(_delta: float) -> bool:
 	frame += 1
+	if wall and frame == wall_off:
+		wall.visible = false
 	var now := Time.get_ticks_usec()
 	if frame > warmup and last != 0:
 		times.append((now - last) / 1000.0)
