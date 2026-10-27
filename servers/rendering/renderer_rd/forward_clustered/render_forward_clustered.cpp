@@ -4344,6 +4344,15 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 	if (p_surface->vg_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_uniform_set)) {
 		RD::get_singleton()->free_rid(p_surface->vg_uniform_set);
 	}
+	if (p_surface->vg_traverse_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_traverse_uniform_set)) {
+		RD::get_singleton()->free_rid(p_surface->vg_traverse_uniform_set);
+	}
+	p_surface->vg_traverse_uniform_set = RID();
+	if (p_surface->vg_work_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(p_surface->vg_work_buffer);
+		p_surface->vg_work_buffer = RID();
+	}
+	p_surface->vg_node_count = 0;
 	if (p_surface->vg_visibility_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_surface->vg_visibility_buffer);
 		p_surface->vg_visibility_buffer = RID();
@@ -4352,6 +4361,31 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 		RD::get_singleton()->free_rid(p_surface->vg_command_buffer);
 	}
 	geometry_instance_surface_alloc.free(p_surface);
+}
+
+void RenderForwardClustered::_virtual_geometry_fill_push_constant(RendererRD::VirtualGeometryEffect::PushConstant &r_push_constant, const Transform3D &p_view, const GeometryInstanceSurfaceDataCache *p_surface) const {
+	const Transform3D modelview = p_view * p_surface->owner->transform;
+	for (int r = 0; r < 3; r++) {
+		r_push_constant.modelview[r * 4 + 0] = modelview.basis.rows[r][0];
+		r_push_constant.modelview[r * 4 + 1] = modelview.basis.rows[r][1];
+		r_push_constant.modelview[r * 4 + 2] = modelview.basis.rows[r][2];
+		r_push_constant.modelview[r * 4 + 3] = modelview.origin[r];
+	}
+	r_push_constant.cluster_count = p_surface->vg_cluster_count;
+	r_push_constant.node_count = p_surface->vg_node_count;
+	if (p_surface->vg_traverse_uniform_set.is_valid()) {
+		r_push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_HIERARCHY;
+	} else {
+		r_push_constant.flags &= ~RendererRD::VirtualGeometryEffect::FLAG_HIERARCHY;
+	}
+}
+
+void RenderForwardClustered::_virtual_geometry_dispatch(RD::ComputeListID p_compute_list, const GeometryInstanceSurfaceDataCache *p_surface) {
+	if (p_surface->vg_traverse_uniform_set.is_valid()) {
+		RD::get_singleton()->compute_list_dispatch_indirect(p_compute_list, p_surface->vg_work_buffer, 0);
+	} else {
+		RD::get_singleton()->compute_list_dispatch(p_compute_list, Math::division_round_up(p_surface->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
+	}
 }
 
 void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion) {
@@ -4427,23 +4461,30 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 	}
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline());
-	{
-		for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
-			{
-				const Transform3D modelview = view * surf->owner->transform;
-				for (int r = 0; r < 3; r++) {
-					push_constant.modelview[r * 4 + 0] = modelview.basis.rows[r][0];
-					push_constant.modelview[r * 4 + 1] = modelview.basis.rows[r][1];
-					push_constant.modelview[r * 4 + 2] = modelview.basis.rows[r][2];
-					push_constant.modelview[r * 4 + 3] = modelview.origin[r];
-				}
-				push_constant.cluster_count = surf->vg_cluster_count;
-				RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_uniform_set, 0);
-				RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
-				RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
-			}
+	// Hierarchy traversal first: one workgroup per instance emits the clusters worth testing.
+	bool traversed = false;
+	for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
+		if (!surf->vg_traverse_uniform_set.is_valid()) {
+			continue;
 		}
+		if (!traversed) {
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_traverse_pipeline());
+			traversed = true;
+		}
+		_virtual_geometry_fill_push_constant(push_constant, view, surf);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_traverse_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		RD::get_singleton()->compute_list_dispatch(compute_list, 1, 1, 1);
+	}
+	if (traversed) {
+		RD::get_singleton()->compute_list_add_barrier(compute_list);
+	}
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline());
+	for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
+		_virtual_geometry_fill_push_constant(push_constant, view, surf);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		_virtual_geometry_dispatch(compute_list, surf);
 	}
 	RD::get_singleton()->compute_list_end();
 }
@@ -4464,17 +4505,10 @@ bool RenderForwardClustered::_virtual_geometry_occlusion(const RenderDataRD *p_r
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, occlusion_uniform_set, 1);
 	for (uint32_t i = 0; i < virtual_geometry_camera_surface_count; i++) {
 		GeometryInstanceSurfaceDataCache *surf = virtual_geometry_surfaces[i];
-		const Transform3D modelview = virtual_geometry_view * surf->owner->transform;
-		for (int r = 0; r < 3; r++) {
-			push_constant.modelview[r * 4 + 0] = modelview.basis.rows[r][0];
-			push_constant.modelview[r * 4 + 1] = modelview.basis.rows[r][1];
-			push_constant.modelview[r * 4 + 2] = modelview.basis.rows[r][2];
-			push_constant.modelview[r * 4 + 3] = modelview.origin[r];
-		}
-		push_constant.cluster_count = surf->vg_cluster_count;
+		_virtual_geometry_fill_push_constant(push_constant, virtual_geometry_view, surf);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
-		RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
+		_virtual_geometry_dispatch(compute_list, surf);
 	}
 	RD::get_singleton()->compute_list_end();
 	return true;
@@ -4572,7 +4606,15 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	if (vg_cluster_count > 0 && virtual_geometry && ginstance->data->base_type == RSE::INSTANCE_MESH) {
 		sdcache->vg_command_buffer = virtual_geometry->create_command_buffer(mesh_storage->mesh_surface_get_vg_cluster_data(sdcache->surface), mesh_storage->mesh_surface_get_vg_leaf_index_count(sdcache->surface));
 		sdcache->vg_visibility_buffer = virtual_geometry->create_visibility_buffer(vg_cluster_count);
-		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(mesh_storage->mesh_surface_get_vg_cluster_buffer(sdcache->surface), sdcache->vg_command_buffer, sdcache->vg_visibility_buffer);
+		const uint32_t vg_node_count = mesh_storage->mesh_surface_get_vg_node_count(sdcache->surface);
+		const RID vg_node_buffer = mesh_storage->mesh_surface_get_vg_node_buffer(sdcache->surface);
+		sdcache->vg_work_buffer = virtual_geometry->create_work_buffer(vg_node_count, vg_cluster_count);
+		const RID vg_cluster_buffer = mesh_storage->mesh_surface_get_vg_cluster_buffer(sdcache->surface);
+		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer);
+		if (virtual_geometry->uses_indirect_count() && vg_node_count > 0) {
+			sdcache->vg_traverse_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_TRAVERSE);
+			sdcache->vg_node_count = vg_node_count;
+		}
 		sdcache->vg_cluster_count = vg_cluster_count;
 	}
 

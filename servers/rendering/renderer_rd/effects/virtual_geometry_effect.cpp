@@ -74,9 +74,10 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 	Vector<String> modes;
 	modes.push_back("");
 	modes.push_back("\n#define MODE_OCCLUSION\n");
+	modes.push_back("\n#define MODE_TRAVERSE\n");
 	shader.initialize(modes);
 	shader_version = shader.version_create();
-	for (int i = 0; i < 2; i++) {
+	for (int i = 0; i < MODE_MAX; i++) {
 		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
 	}
 
@@ -146,7 +147,7 @@ RID VirtualGeometryEffect::build_hzb(Ref<RenderSceneBuffersRD> p_render_buffers,
 RID VirtualGeometryEffect::get_occlusion_uniform_set(RID p_hzb) {
 	RID sampler = MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RD::Uniform u_hzb(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_hzb }));
-	return UniformSetCacheRD::get_singleton()->get_cache(get_shader(true), 1, u_hzb);
+	return UniformSetCacheRD::get_singleton()->get_cache(get_shader(MODE_OCCLUSION), 1, u_hzb);
 }
 
 RID VirtualGeometryEffect::create_visibility_buffer(uint32_t p_cluster_count) const {
@@ -161,13 +162,21 @@ VirtualGeometryEffect::~VirtualGeometryEffect() {
 	shader.version_free(shader_version);
 }
 
-RID VirtualGeometryEffect::get_shader(bool p_occlusion) const {
-	return const_cast<VirtualGeometrySelectShaderRD &>(shader).version_get_shader(shader_version, p_occlusion ? 1 : 0);
+RID VirtualGeometryEffect::get_shader(ShaderMode p_mode) const {
+	return const_cast<VirtualGeometrySelectShaderRD &>(shader).version_get_shader(shader_version, p_mode);
+}
+
+RID VirtualGeometryEffect::create_work_buffer(uint32_t p_node_count, uint32_t p_cluster_count) const {
+	Vector<uint8_t> zero;
+	zero.resize_initialized(WORK_HEADER_SIZE + sizeof(uint32_t) * (p_node_count + p_cluster_count));
+	return RD::get_singleton()->storage_buffer_create(zero.size(), zero, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 }
 
 RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluster_data, uint32_t p_leaf_index_count) const {
-	const uint32_t cluster_count = p_cluster_data.size() / sizeof(VirtualGeometryCluster);
-	const VirtualGeometryCluster *clusters = reinterpret_cast<const VirtualGeometryCluster *>(p_cluster_data.ptr());
+	uint32_t cluster_count = 0;
+	uint32_t node_count = 0;
+	ERR_FAIL_COND_V(!VirtualGeometry::unpack_header(p_cluster_data, cluster_count, node_count), RID());
+	const VirtualGeometryCluster *clusters = reinterpret_cast<const VirtualGeometryCluster *>(p_cluster_data.ptr() + VirtualGeometry::get_cluster_data_offset());
 
 	// Leaves are packed first so the initial contents are valid for both the compacted and the per-slot layout.
 	Vector<uint8_t> data;
@@ -193,7 +202,7 @@ RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluste
 	return RD::get_singleton()->storage_buffer_create(data.size(), data, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 }
 
-RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer) const {
+RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer, RID p_node_buffer, RID p_work_buffer, ShaderMode p_mode) const {
 	Vector<RD::Uniform> uniforms;
 	{
 		RD::Uniform u;
@@ -223,5 +232,19 @@ RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_comman
 		u.append_id(p_visibility_buffer);
 		uniforms.push_back(u);
 	}
-	return RD::get_singleton()->uniform_set_create(uniforms, get_shader(), 0);
+	{
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.binding = 4;
+		u.append_id(p_node_buffer);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.binding = 5;
+		u.append_id(p_work_buffer);
+		uniforms.push_back(u);
+	}
+	return RD::get_singleton()->uniform_set_create(uniforms, get_shader(p_mode), 0);
 }

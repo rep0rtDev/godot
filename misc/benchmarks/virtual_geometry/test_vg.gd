@@ -11,8 +11,10 @@ func make_sphere(rings: int, segs: int) -> Array:
 	var a := arrays.get_mesh_arrays()
 	return a
 
+const HEADER := 16
+
 func cluster_at(buf: PackedByteArray, i: int) -> Dictionary:
-	var o := i * 64
+	var o := HEADER + i * 64
 	return {
 		"cull": Vector4(buf.decode_float(o), buf.decode_float(o + 4), buf.decode_float(o + 8), buf.decode_float(o + 12)),
 		"self": Vector4(buf.decode_float(o + 16), buf.decode_float(o + 20), buf.decode_float(o + 24), buf.decode_float(o + 28)),
@@ -21,6 +23,18 @@ func cluster_at(buf: PackedByteArray, i: int) -> Dictionary:
 		"parent_error": buf.decode_float(o + 52),
 		"offset": buf.decode_u32(o + 56),
 		"count": buf.decode_u32(o + 60),
+	}
+
+func node_at(buf: PackedByteArray, cluster_count: int, i: int) -> Dictionary:
+	var o := HEADER + cluster_count * 64 + i * 64
+	return {
+		"cull": Vector4(buf.decode_float(o), buf.decode_float(o + 4), buf.decode_float(o + 8), buf.decode_float(o + 12)),
+		"lod": Vector4(buf.decode_float(o + 16), buf.decode_float(o + 20), buf.decode_float(o + 24), buf.decode_float(o + 28)),
+		"max_parent_error": buf.decode_float(o + 32),
+		"child_first": buf.decode_u32(o + 36),
+		"child_count": buf.decode_u32(o + 40),
+		"cluster_first": buf.decode_u32(o + 44),
+		"cluster_count": buf.decode_u32(o + 48),
 	}
 
 func fine_enough(sphere: Vector4, err: float, cam: Vector3, lod_scale: float) -> bool:
@@ -44,7 +58,16 @@ func _init() -> void:
 		return
 	var buf: PackedByteArray = sd["vg_clusters"]
 	var leaf_count: int = sd["vg_leaf_index_count"]
-	var n := buf.size() / 64
+	if buf.decode_u32(0) != 0x32444756:
+		print("FAIL: bad vg data magic")
+		quit(1)
+		return
+	var n := buf.decode_u32(4)
+	var node_count := buf.decode_u32(8)
+	if buf.size() != HEADER + (n + node_count) * 64:
+		print("FAIL: vg data size mismatch")
+		quit(1)
+		return
 	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 	var idx := PackedInt32Array()
 	var ib: PackedByteArray = sd["index_data"]
@@ -75,7 +98,47 @@ func _init() -> void:
 	for c in clusters:
 		if c["parent_error"] > FLT_BIG:
 			root_tris += c["count"] / 3
-	print("roots=%d root_tris=%d" % [roots, root_tris])
+	print("roots=%d root_tris=%d nodes=%d" % [roots, root_tris, node_count])
+
+	# Hierarchy: leaves partition the cluster array, inner nodes cover exactly their children's ranges,
+	# and bounds/errors are conservative for everything below.
+	var nodes := []
+	for j in node_count:
+		nodes.append(node_at(buf, n, j))
+	var covered := PackedInt32Array()
+	covered.resize(n)
+	for j in node_count:
+		var nd: Dictionary = nodes[j]
+		var first: int = nd["cluster_first"]
+		var cnt: int = nd["cluster_count"]
+		if cnt == 0 or first + cnt > n:
+			print("FAIL: bad node range %d" % j); failures += 1
+			continue
+		if nd["child_count"] == 0:
+			for k in range(first, first + cnt):
+				covered[k] += 1
+				var c: Dictionary = clusters[k]
+				var ps: Vector4 = c["parent"]
+				var ls: Vector4 = nd["lod"]
+				if Vector3(ps.x, ps.y, ps.z).distance_to(Vector3(ls.x, ls.y, ls.z)) + ps.w > ls.w * 1.0001 + 1e-5:
+					print("FAIL: node %d lod sphere does not contain cluster %d" % [j, k]); failures += 1
+				if c["parent_error"] > nd["max_parent_error"]:
+					print("FAIL: node %d error below cluster %d" % [j, k]); failures += 1
+		else:
+			var expect: int = first
+			for ch in range(nd["child_first"], nd["child_first"] + nd["child_count"]):
+				var cd: Dictionary = nodes[ch]
+				if cd["cluster_first"] != expect:
+					print("FAIL: node %d child ranges not contiguous" % j); failures += 1
+				expect = cd["cluster_first"] + cd["cluster_count"]
+			if expect != first + cnt:
+				print("FAIL: node %d range mismatch" % j); failures += 1
+	for k in n:
+		if covered[k] != 1:
+			print("FAIL: cluster %d covered %d times" % [k, covered[k]]); failures += 1
+			break
+	if nodes[0]["cluster_first"] != 0 or nodes[0]["cluster_count"] != n:
+		print("FAIL: root does not cover all clusters"); failures += 1
 
 	# Simulate GPU selection for several camera distances and check the cut is watertight
 	# (every position-edge used exactly twice on a closed mesh) and triangle count shrinks with distance.
@@ -85,8 +148,30 @@ func _init() -> void:
 		var lod_scale := 1080.0 * 0.5 * (1.0 / tan(deg_to_rad(37.5))) / 1.0
 		var edges := {}
 		var tris := 0
+		# Traverse like the GPU: only clusters under expanded nodes are tested.
+		var queue := [0]
+		var candidates := []
+		var visited := 0
+		while not queue.is_empty():
+			var nd: Dictionary = nodes[queue.pop_back()]
+			visited += 1
+			if fine_enough(nd["lod"], nd["max_parent_error"], cam, lod_scale):
+				continue
+			if nd["child_count"] == 0:
+				for ci in range(nd["cluster_first"], nd["cluster_first"] + nd["cluster_count"]):
+					candidates.append(ci)
+			else:
+				for ch in range(nd["child_first"], nd["child_first"] + nd["child_count"]):
+					queue.append(ch)
+		var flat_selected := 0
 		for c in clusters:
 			if fine_enough(c["self"], c["self_error"], cam, lod_scale) and not fine_enough(c["parent"], c["parent_error"], cam, lod_scale):
+				flat_selected += 1
+		var hier_selected := 0
+		for ci in candidates:
+			var c: Dictionary = clusters[ci]
+			if fine_enough(c["self"], c["self_error"], cam, lod_scale) and not fine_enough(c["parent"], c["parent_error"], cam, lod_scale):
+				hier_selected += 1
 				tris += c["count"] / 3
 				for t in range(c["offset"], c["offset"] + c["count"], 3):
 					for e in 3:
@@ -101,7 +186,9 @@ func _init() -> void:
 		for k in edges:
 			if edges[k] != 2:
 				bad += 1
-		print("dist=%7.1f tris=%7d open_edges=%d" % [dist, tris, bad])
+		print("dist=%7.1f tris=%7d open_edges=%d nodes_visited=%d candidates=%d selected=%d" % [dist, tris, bad, visited, candidates.size(), hier_selected])
+		if hier_selected != flat_selected:
+			print("FAIL: hierarchy selected %d clusters, flat selection %d" % [hier_selected, flat_selected]); failures += 1
 		if tris == 0 or tris > prev_tris:
 			print("FAIL: triangle count not monotonic"); failures += 1
 		prev_tris = tris

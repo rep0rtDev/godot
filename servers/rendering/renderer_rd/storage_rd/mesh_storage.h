@@ -128,6 +128,8 @@ private:
 
 			// Virtual geometry: index_array covers only the leaf clusters, vg_index_array covers every level.
 			RID vg_cluster_buffer;
+			RID vg_node_buffer;
+			uint32_t vg_node_count = 0;
 			RID vg_index_array;
 			uint32_t vg_cluster_count = 0;
 			uint32_t vg_leaf_index_count = 0;
@@ -512,6 +514,14 @@ public:
 
 	_FORCE_INLINE_ uint32_t mesh_surface_get_vg_cluster_count(void *p_surface) const {
 		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_cluster_count;
+	}
+
+	_FORCE_INLINE_ uint32_t mesh_surface_get_vg_node_count(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_node_count;
+	}
+
+	_FORCE_INLINE_ RID mesh_surface_get_vg_node_buffer(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_node_buffer;
 	}
 
 	_FORCE_INLINE_ RID mesh_surface_get_vg_cluster_buffer(void *p_surface) const {

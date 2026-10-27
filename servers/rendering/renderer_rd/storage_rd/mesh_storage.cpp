@@ -421,11 +421,17 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 		s->index_buffer = RD::get_singleton()->index_buffer_create(new_surface.index_count, is_index_16 ? RD::INDEX_BUFFER_FORMAT_UINT16 : RD::INDEX_BUFFER_FORMAT_UINT32, new_surface.index_data, false, requested_storage_flag);
 		s->index_buffer_size = new_surface.index_data.size();
 		s->index_count = new_surface.index_count;
-		if (new_surface.vg_cluster_data.size() && new_surface.vg_leaf_index_count > 0 && new_surface.vg_leaf_index_count <= new_surface.index_count) {
+		uint32_t vg_cluster_count = 0;
+		uint32_t vg_node_count = 0;
+		if (VirtualGeometry::unpack_header(new_surface.vg_cluster_data, vg_cluster_count, vg_node_count) && new_surface.vg_leaf_index_count > 0 && new_surface.vg_leaf_index_count <= new_surface.index_count) {
 			s->vg_cluster_data = new_surface.vg_cluster_data;
-			s->vg_cluster_count = new_surface.vg_cluster_data.size() / sizeof(VirtualGeometryCluster);
+			s->vg_cluster_count = vg_cluster_count;
+			s->vg_node_count = vg_node_count;
 			s->vg_leaf_index_count = new_surface.vg_leaf_index_count;
-			s->vg_cluster_buffer = RD::get_singleton()->storage_buffer_create(new_surface.vg_cluster_data.size(), new_surface.vg_cluster_data);
+			const uint32_t cluster_offset = VirtualGeometry::get_cluster_data_offset();
+			const uint32_t node_offset = VirtualGeometry::get_node_data_offset(vg_cluster_count);
+			s->vg_cluster_buffer = RD::get_singleton()->storage_buffer_create(node_offset - cluster_offset, new_surface.vg_cluster_data.slice(cluster_offset, node_offset));
+			s->vg_node_buffer = RD::get_singleton()->storage_buffer_create(new_surface.vg_cluster_data.size() - node_offset, new_surface.vg_cluster_data.slice(node_offset));
 			s->vg_index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
 			s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->vg_leaf_index_count);
 		} else {
@@ -542,6 +548,9 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 		memfree(s.versions); // reallocs, so free with memfree.
 	}
 
+	if (s.vg_node_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(s.vg_node_buffer);
+	}
 	if (s.vg_cluster_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.vg_cluster_buffer);
 	}

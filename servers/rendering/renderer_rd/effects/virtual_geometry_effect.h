@@ -47,6 +47,16 @@ public:
 	static constexpr uint32_t FLAG_STATS = 4;
 	static constexpr uint32_t FLAG_OCCLUSION_PHASE1 = 8;
 	static constexpr uint32_t FLAG_FLIP_Y = 16;
+	static constexpr uint32_t FLAG_HIERARCHY = 32;
+	// Indirect dispatch size and candidate count of the hierarchical traversal, see create_work_buffer().
+	static constexpr uint32_t WORK_HEADER_SIZE = 16;
+
+	enum ShaderMode {
+		MODE_SELECT,
+		MODE_OCCLUSION,
+		MODE_TRAVERSE,
+		MODE_MAX,
+	};
 	// Draw counts (camera, shadow, late camera) padded to 16 bytes, followed by the three command ranges.
 	static constexpr uint32_t HEADER_SIZE = 16;
 
@@ -56,7 +66,7 @@ public:
 		uint32_t cluster_count;
 		float lod_scale;
 		uint32_t flags;
-		uint32_t pad;
+		uint32_t node_count;
 	};
 	static_assert(sizeof(PushConstant) == 128);
 
@@ -72,7 +82,7 @@ public:
 private:
 	VirtualGeometrySelectShaderRD shader;
 	RID shader_version;
-	RID pipelines[2];
+	RID pipelines[MODE_MAX];
 
 	struct HzbPushConstant {
 		int32_t source_size[2];
@@ -95,8 +105,9 @@ public:
 	VirtualGeometryEffect();
 	~VirtualGeometryEffect();
 
-	RID get_shader(bool p_occlusion = false) const;
-	RID get_pipeline(bool p_occlusion = false) const { return pipelines[p_occlusion ? 1 : 0]; }
+	RID get_shader(ShaderMode p_mode = MODE_SELECT) const;
+	RID get_pipeline(bool p_occlusion = false) const { return pipelines[p_occlusion ? MODE_OCCLUSION : MODE_SELECT]; }
+	RID get_traverse_pipeline() const { return pipelines[MODE_TRAVERSE]; }
 	bool uses_occlusion_culling() const { return occlusion_culling && use_indirect_count; }
 
 	// Builds the reversed-Z depth pyramid for p_depth and returns it, sized to the largest power of two that fits.
@@ -113,7 +124,9 @@ public:
 
 	// Command buffer with a count header and two draw ranges (camera and shadow); both start as the full-detail leaf clusters.
 	RID create_command_buffer(const Vector<uint8_t> &p_cluster_data, uint32_t p_leaf_index_count) const;
-	RID create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer) const;
+	// Traversal queue and candidate list for one instance of a surface with p_node_count hierarchy nodes.
+	RID create_work_buffer(uint32_t p_node_count, uint32_t p_cluster_count) const;
+	RID create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer, RID p_node_buffer, RID p_work_buffer, ShaderMode p_mode = MODE_SELECT) const;
 };
 
 } // namespace RendererRD

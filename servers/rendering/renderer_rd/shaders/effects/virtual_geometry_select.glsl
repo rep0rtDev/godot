@@ -49,6 +49,33 @@ commands;
 #define FLAG_STATS 4u
 #define FLAG_OCCLUSION_PHASE1 8u
 #define FLAG_FLIP_Y 16u
+#define FLAG_HIERARCHY 32u
+
+struct Node {
+	vec4 cull_sphere;
+	vec4 lod_sphere;
+	float max_parent_error;
+	uint child_first;
+	uint child_count;
+	uint cluster_first;
+	uint cluster_count;
+	uint pad0;
+	uint pad1;
+	uint pad2;
+};
+
+layout(set = 0, binding = 4, std430) restrict readonly buffer Nodes {
+	Node data[];
+}
+nodes;
+
+// [0..2]: indirect dispatch size for the candidate pass, [3]: candidate count,
+// then the traversal queue (node_count entries) and the candidate cluster ids (cluster_count entries).
+#define WORK_HEADER 4u
+layout(set = 0, binding = 5, std430) restrict coherent buffer Work {
+	uint data[];
+}
+work;
 
 // 1 when the cluster passed the occlusion test last frame. Phase one draws only those; phase two
 // tests everything against the depth pyramid built from phase one and draws the newly visible rest.
@@ -73,7 +100,7 @@ layout(push_constant, std430) uniform Params {
 	uint cluster_count;
 	float lod_scale; // Pixels per unit at unit distance, divided by the pixel error threshold.
 	uint flags;
-	uint pad;
+	uint node_count;
 }
 params;
 
@@ -153,18 +180,87 @@ bool is_occluded(vec3 center, float radius) {
 }
 #endif
 
+float instance_scale() {
+	vec3 axis_x = vec3(params.modelview[0].x, params.modelview[1].x, params.modelview[2].x);
+	vec3 axis_y = vec3(params.modelview[0].y, params.modelview[1].y, params.modelview[2].y);
+	vec3 axis_z = vec3(params.modelview[0].z, params.modelview[1].z, params.modelview[2].z);
+	return sqrt(max(dot(axis_x, axis_x), max(dot(axis_y, axis_y), dot(axis_z, axis_z))));
+}
+
+#ifdef MODE_TRAVERSE
+
+// One workgroup walks the hierarchy breadth first. A node is expanded while some cluster below it could still
+// need finer detail than its parent offers; accepted leaves emit their clusters as candidates for the
+// per-cluster pass. Every node is queued at most once, so the queue never exceeds node_count entries.
+shared uint queue_head;
+shared uint queue_tail;
+
+void main() {
+	uint lid = gl_LocalInvocationID.x;
+	float scale = instance_scale();
+	uint candidates = WORK_HEADER + params.node_count;
+	if (lid == 0u) {
+		queue_head = 0u;
+		queue_tail = 1u;
+		work.data[3] = 0u;
+		work.data[WORK_HEADER] = 0u;
+	}
+
+	while (true) {
+		memoryBarrierBuffer();
+		memoryBarrierShared();
+		barrier();
+		uint start = queue_head;
+		uint end = min(queue_tail, start + gl_WorkGroupSize.x);
+		barrier();
+		if (start >= end) {
+			break;
+		}
+		if (lid == 0u) {
+			queue_head = end;
+		}
+		if (start + lid < end) {
+			Node n = nodes.data[work.data[WORK_HEADER + start + lid]];
+			if (!error_is_imperceptible(n.lod_sphere, n.max_parent_error, scale)) {
+				if (n.child_count == 0u) {
+					uint dst = atomicAdd(work.data[3], n.cluster_count);
+					for (uint k = 0u; k < n.cluster_count; k++) {
+						work.data[candidates + dst + k] = n.cluster_first + k;
+					}
+				} else {
+					uint dst = atomicAdd(queue_tail, n.child_count);
+					for (uint k = 0u; k < n.child_count; k++) {
+						work.data[WORK_HEADER + dst + k] = n.child_first + k;
+					}
+				}
+			}
+		}
+	}
+
+	if (lid == 0u) {
+		uint count = work.data[3];
+		work.data[0] = (count + 63u) / 64u;
+		work.data[1] = 1u;
+		work.data[2] = 1u;
+	}
+}
+
+#else
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
-	if (index >= params.cluster_count) {
+	if ((params.flags & FLAG_HIERARCHY) != 0u) {
+		if (index >= work.data[3]) {
+			return;
+		}
+		index = work.data[WORK_HEADER + params.node_count + index];
+	} else if (index >= params.cluster_count) {
 		return;
 	}
 
 	Cluster c = clusters.data[index];
 
-	vec3 axis_x = vec3(params.modelview[0].x, params.modelview[1].x, params.modelview[2].x);
-	vec3 axis_y = vec3(params.modelview[0].y, params.modelview[1].y, params.modelview[2].y);
-	vec3 axis_z = vec3(params.modelview[0].z, params.modelview[1].z, params.modelview[2].z);
-	float scale = sqrt(max(dot(axis_x, axis_x), max(dot(axis_y, axis_y), dot(axis_z, axis_z))));
+	float scale = instance_scale();
 
 	bool selected = error_is_imperceptible(c.self_sphere, c.self_error, scale) && !error_is_imperceptible(c.parent_sphere, c.parent_error, scale);
 	bool visible = selected && in_frustum(to_view(c.cull_sphere.xyz), c.cull_sphere.w * scale);
@@ -224,3 +320,5 @@ void main() {
 		commands.data[params.cluster_count + index] = cmd;
 	}
 }
+
+#endif // MODE_TRAVERSE

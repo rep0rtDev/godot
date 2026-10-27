@@ -47,11 +47,37 @@ struct VirtualGeometryCluster {
 
 static_assert(sizeof(VirtualGeometryCluster) == 64);
 
+// Bounding volume hierarchy node over cluster "parts" (clusters simplified into the same parent group).
+// Every node covers a contiguous cluster range, children of a node are contiguous in the node array.
+struct VirtualGeometryNode {
+	float cull_sphere[4]; // Union of the cull spheres of all clusters below.
+	float lod_sphere[4]; // Union of the parent LOD spheres of all clusters below.
+	float max_parent_error; // FLT_MAX when a root cluster is below.
+	uint32_t child_first;
+	uint32_t child_count; // 0 for leaves.
+	uint32_t cluster_first;
+	uint32_t cluster_count;
+	uint32_t pad[3];
+};
+
+static_assert(sizeof(VirtualGeometryNode) == 64);
+
+// Serialized surface data ("vg_clusters"): header, clusters, then hierarchy nodes.
+struct VirtualGeometryHeader {
+	uint32_t magic;
+	uint32_t cluster_count;
+	uint32_t node_count;
+	uint32_t reserved;
+};
+
+static_assert(sizeof(VirtualGeometryHeader) == 16);
+
 struct VirtualGeometryBuildResult {
 	// Indices of every cluster of every level, finest level first, so the
 	// range [0, leaf_index_count) is the full-detail mesh.
 	Vector<uint32_t> indices;
 	Vector<VirtualGeometryCluster> clusters;
+	Vector<VirtualGeometryNode> nodes;
 	uint32_t leaf_index_count = 0;
 	uint32_t leaf_cluster_count = 0;
 	uint32_t level_count = 0;
@@ -63,6 +89,14 @@ public:
 	static constexpr uint32_t MAX_CLUSTER_VERTICES = 255;
 	static constexpr uint32_t GROUP_TARGET_SIZE = 8;
 	static constexpr uint32_t MAX_LEVELS = 32;
+	static constexpr uint32_t NODE_FANOUT = 4;
+	static constexpr uint32_t DATA_MAGIC = 0x32444756; // "VGD2".
+
+	static Vector<uint8_t> pack(const VirtualGeometryBuildResult &p_result);
+	// Validates serialized data; returns false (and zero counts) for malformed or old-format data.
+	static bool unpack_header(const Vector<uint8_t> &p_data, uint32_t &r_cluster_count, uint32_t &r_node_count);
+	static uint32_t get_cluster_data_offset() { return sizeof(VirtualGeometryHeader); }
+	static uint32_t get_node_data_offset(uint32_t p_cluster_count) { return sizeof(VirtualGeometryHeader) + p_cluster_count * sizeof(VirtualGeometryCluster); }
 
 	typedef bool (*BuildFunc)(const Vector3 *p_positions, const Vector3 *p_normals, uint32_t p_vertex_count, const uint32_t *p_indices, uint32_t p_index_count, VirtualGeometryBuildResult &r_result);
 	static BuildFunc build_func;

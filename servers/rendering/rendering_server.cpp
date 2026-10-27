@@ -1425,8 +1425,7 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 	surface_data.lods = lods;
 	surface_data.uv_scale = uv_scale;
 	if (use_virtual_geometry) {
-		surface_data.vg_cluster_data.resize(vg_result.clusters.size() * sizeof(VirtualGeometryCluster));
-		memcpy(surface_data.vg_cluster_data.ptrw(), vg_result.clusters.ptr(), surface_data.vg_cluster_data.size());
+		surface_data.vg_cluster_data = VirtualGeometry::pack(vg_result);
 		surface_data.vg_leaf_index_count = vg_result.leaf_index_count;
 	}
 

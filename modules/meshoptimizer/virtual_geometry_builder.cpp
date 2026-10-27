@@ -31,6 +31,7 @@
 #include "virtual_geometry_builder.h"
 
 #include "core/templates/local_vector.h"
+#include "core/templates/sort_array.h"
 
 #include <thirdparty/meshoptimizer/meshoptimizer.h>
 
@@ -46,6 +47,7 @@ struct WorkCluster {
 	float self_error = 0.0f;
 	float parent_error = FLT_MAX;
 	uint32_t level = 0;
+	int32_t part = -1; // Group this cluster was simplified into; -1 for roots.
 };
 
 struct Builder {
@@ -54,6 +56,7 @@ struct Builder {
 	LocalVector<uint32_t> position_remap;
 	uint32_t vertex_count = 0;
 	LocalVector<WorkCluster> clusters;
+	uint32_t part_count = 0;
 
 	// Splits a triangle list into clusters; every new cluster inherits the LOD sphere and error of the group that produced it.
 	void clusterize(const uint32_t *p_indices, uint32_t p_index_count, const float *p_lod_sphere, float p_lod_error, uint32_t p_level, LocalVector<uint32_t> &r_new_ids) {
@@ -182,10 +185,143 @@ struct Builder {
 					c.parent_sphere[i] = group_sphere[i];
 				}
 				c.parent_error = group_error;
+				c.part = part_count;
 			}
+			part_count++;
 			clusterize(simplified.ptr(), result, group_sphere, group_error, p_level, r_next_ids);
 		}
 		return !r_next_ids.is_empty();
+	}
+};
+
+struct Part {
+	LocalVector<uint32_t> clusters;
+	float center[3] = {};
+};
+
+// Builds a bounding volume hierarchy over parts; cluster ids are emitted in depth-first leaf order so that
+// every node covers a contiguous range of the output cluster array.
+struct HierarchyBuilder {
+	const LocalVector<WorkCluster> *clusters = nullptr;
+	LocalVector<Part> parts;
+	LocalVector<uint32_t> part_order;
+	LocalVector<VirtualGeometryNode> nodes;
+	LocalVector<uint32_t> cluster_order;
+
+	static void sphere_union(const LocalVector<float> &p_spheres, float *r_sphere) {
+		const uint32_t count = p_spheres.size() / 4;
+		LocalVector<float> centers;
+		LocalVector<float> radii;
+		centers.resize(count * 3);
+		radii.resize(count);
+		for (uint32_t i = 0; i < count; i++) {
+			centers[i * 3 + 0] = p_spheres[i * 4 + 0];
+			centers[i * 3 + 1] = p_spheres[i * 4 + 1];
+			centers[i * 3 + 2] = p_spheres[i * 4 + 2];
+			radii[i] = p_spheres[i * 4 + 3];
+		}
+		const meshopt_Bounds b = meshopt_computeSphereBounds(centers.ptr(), count, sizeof(float) * 3, radii.ptr(), sizeof(float));
+		r_sphere[0] = b.center[0];
+		r_sphere[1] = b.center[1];
+		r_sphere[2] = b.center[2];
+		r_sphere[3] = b.radius;
+	}
+
+	void fill(uint32_t p_node, uint32_t p_begin, uint32_t p_end) {
+		VirtualGeometryNode node = {};
+		LocalVector<float> cull;
+		LocalVector<float> lod;
+		node.cluster_first = cluster_order.size();
+		node.max_parent_error = 0.0f;
+
+		if (p_end - p_begin == 1) {
+			for (uint32_t id : parts[part_order[p_begin]].clusters) {
+				const WorkCluster &c = (*clusters)[id];
+				cluster_order.push_back(id);
+				for (int k = 0; k < 4; k++) {
+					cull.push_back(c.cull_sphere[k]);
+					lod.push_back(c.parent_error == FLT_MAX ? c.self_sphere[k] : c.parent_sphere[k]);
+				}
+				node.max_parent_error = MAX(node.max_parent_error, c.parent_error);
+			}
+		} else {
+			float lo[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+			float hi[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+			for (uint32_t i = p_begin; i < p_end; i++) {
+				for (int k = 0; k < 3; k++) {
+					lo[k] = MIN(lo[k], parts[part_order[i]].center[k]);
+					hi[k] = MAX(hi[k], parts[part_order[i]].center[k]);
+				}
+			}
+			int axis = 0;
+			for (int k = 1; k < 3; k++) {
+				if (hi[k] - lo[k] > hi[axis] - lo[axis]) {
+					axis = k;
+				}
+			}
+			struct Compare {
+				const LocalVector<Part> *parts;
+				int axis;
+				bool operator()(uint32_t a, uint32_t b) const { return (*parts)[a].center[axis] < (*parts)[b].center[axis]; }
+			};
+			SortArray<uint32_t, Compare> sorter;
+			sorter.compare.parts = &parts;
+			sorter.compare.axis = axis;
+			sorter.sort(part_order.ptr() + p_begin, p_end - p_begin);
+
+			const uint32_t count = p_end - p_begin;
+			const uint32_t child_count = MIN(count, VirtualGeometry::NODE_FANOUT);
+			node.child_first = nodes.size();
+			node.child_count = child_count;
+			nodes.resize(nodes.size() + child_count);
+			for (uint32_t i = 0; i < child_count; i++) {
+				const uint32_t b = p_begin + count * i / child_count;
+				const uint32_t e = p_begin + count * (i + 1) / child_count;
+				fill(node.child_first + i, b, e);
+				const VirtualGeometryNode &child = nodes[node.child_first + i];
+				for (int k = 0; k < 4; k++) {
+					cull.push_back(child.cull_sphere[k]);
+					lod.push_back(child.lod_sphere[k]);
+				}
+				node.max_parent_error = MAX(node.max_parent_error, child.max_parent_error);
+			}
+		}
+		sphere_union(cull, node.cull_sphere);
+		sphere_union(lod, node.lod_sphere);
+		node.cluster_count = cluster_order.size() - node.cluster_first;
+		nodes[p_node] = node;
+	}
+
+	void build(const LocalVector<WorkCluster> &p_clusters, uint32_t p_part_count) {
+		clusters = &p_clusters;
+		parts.resize(p_part_count);
+		for (uint32_t i = 0; i < p_clusters.size(); i++) {
+			const int32_t part = p_clusters[i].part;
+			if (part >= 0) {
+				parts[part].clusters.push_back(i);
+			} else {
+				Part root;
+				root.clusters.push_back(i);
+				parts.push_back(root);
+			}
+		}
+		for (uint32_t p = 0; p < parts.size(); p++) {
+			Part &part = parts[p];
+			if (part.clusters.is_empty()) {
+				continue;
+			}
+			for (uint32_t id : part.clusters) {
+				for (int k = 0; k < 3; k++) {
+					part.center[k] += p_clusters[id].cull_sphere[k];
+				}
+			}
+			for (int k = 0; k < 3; k++) {
+				part.center[k] /= part.clusters.size();
+			}
+			part_order.push_back(p);
+		}
+		nodes.resize(1);
+		fill(0, 0, part_order.size());
 	}
 };
 
@@ -237,12 +373,24 @@ bool virtual_geometry_build(const Vector3 *p_positions, const Vector3 *p_normals
 	r_result.leaf_index_count = 0;
 	r_result.level_count = level;
 
+	HierarchyBuilder hierarchy;
+	hierarchy.build(b.clusters, b.part_count);
+	ERR_FAIL_COND_V(hierarchy.cluster_order.size() != b.clusters.size(), false);
+	LocalVector<uint32_t> new_index;
+	new_index.resize(b.clusters.size());
+	for (uint32_t i = 0; i < hierarchy.cluster_order.size(); i++) {
+		new_index[hierarchy.cluster_order[i]] = i;
+	}
+	r_result.nodes.resize(hierarchy.nodes.size());
+	memcpy(r_result.nodes.ptrw(), hierarchy.nodes.ptr(), sizeof(VirtualGeometryNode) * hierarchy.nodes.size());
+
+	// Index data stays in creation order (finest level first); cluster records follow the hierarchy order.
 	uint32_t *iw = r_result.indices.ptrw();
 	VirtualGeometryCluster *cw = r_result.clusters.ptrw();
 	uint32_t offset = 0;
 	for (uint32_t i = 0; i < b.clusters.size(); i++) {
 		const WorkCluster &c = b.clusters[i];
-		VirtualGeometryCluster &o = cw[i];
+		VirtualGeometryCluster &o = cw[new_index[i]];
 		for (int k = 0; k < 4; k++) {
 			o.cull_sphere[k] = c.cull_sphere[k];
 			o.self_sphere[k] = c.self_sphere[k];

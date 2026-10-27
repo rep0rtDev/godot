@@ -571,6 +571,10 @@ private:
 		RID vg_command_buffer;
 		RID vg_visibility_buffer;
 		RID vg_uniform_set;
+		// Hierarchical traversal (compact draws only): per-instance queue and candidate list.
+		RID vg_work_buffer;
+		RID vg_traverse_uniform_set;
+		uint32_t vg_node_count = 0;
 		uint32_t vg_cluster_count = 0;
 		uint64_t vg_last_pass = 0;
 
@@ -789,6 +793,8 @@ private:
 	LocalVector<RenderElementInfo> virtual_geometry_late_element_info;
 
 	void _virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion);
+	void _virtual_geometry_fill_push_constant(RendererRD::VirtualGeometryEffect::PushConstant &r_push_constant, const Transform3D &p_view, const GeometryInstanceSurfaceDataCache *p_surface) const;
+	void _virtual_geometry_dispatch(RD::ComputeListID p_compute_list, const GeometryInstanceSurfaceDataCache *p_surface);
 	bool _virtual_geometry_occlusion(const RenderDataRD *p_render_data);
 	void _geometry_instance_surface_free(GeometryInstanceSurfaceDataCache *p_surface);
 
