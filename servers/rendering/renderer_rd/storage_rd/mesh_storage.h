@@ -536,6 +536,26 @@ public:
 		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_leaf_index_count;
 	}
 
+	_FORCE_INLINE_ RID mesh_surface_get_vertex_buffer(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vertex_buffer;
+	}
+
+	_FORCE_INLINE_ RID mesh_surface_get_index_buffer(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->index_buffer;
+	}
+
+	_FORCE_INLINE_ bool mesh_surface_has_16_bit_indices(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vertex_count <= 65536;
+	}
+
+	_FORCE_INLINE_ uint64_t mesh_surface_get_format(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->format;
+	}
+
+	_FORCE_INLINE_ AABB mesh_surface_get_aabb(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->aabb;
+	}
+
 	_FORCE_INLINE_ const Vector<uint8_t> &mesh_surface_get_vg_cluster_data(void *p_surface) const {
 		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_cluster_data;
 	}

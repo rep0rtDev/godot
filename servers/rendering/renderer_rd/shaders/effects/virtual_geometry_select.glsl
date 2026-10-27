@@ -36,10 +36,12 @@ struct DrawIndexedCommand {
 };
 
 // Commands [0, cluster_count): camera pass (LOD + frustum). [cluster_count, 2 * cluster_count): shadow and auxiliary passes (LOD only).
+// [2, 3) * cluster_count: late camera clusters. [3, 5) * cluster_count: early and late clusters rasterized in compute,
+// which only the color pass draws.
 // With FLAG_COMPACT the selected clusters are packed at the start of each range and counts[] holds the draw count
 // (cleared to zero before dispatch). Otherwise every cluster keeps its own slot and rejected ones get zero instances.
 layout(set = 0, binding = 1, std430) restrict buffer Commands {
-	uint counts[4];
+	uint counts[8];
 	DrawIndexedCommand data[];
 }
 commands;
@@ -50,6 +52,7 @@ commands;
 #define FLAG_OCCLUSION_PHASE1 8u
 #define FLAG_FLIP_Y 16u
 #define FLAG_HIERARCHY 32u
+#define FLAG_SOFTWARE 64u
 
 struct Node {
 	vec4 cull_sphere;
@@ -72,8 +75,10 @@ nodes;
 // [0..2]: indirect dispatch size for the candidate pass, [3]: candidate count,
 // [4]: 1 when the whole instance failed the camera frustum or occlusion test in last frame's phase two,
 // [5]: the value of [4] seen by this frame's phase one, [6..7]: unused,
-// then the traversal queue (node_count entries) and the candidate cluster ids (cluster_count entries).
-#define WORK_HEADER 8u
+// [8..10] and [11..13]: indirect dispatch size of the early and late software raster (one workgroup per cluster),
+// then the traversal queue (node_count entries), the candidate cluster ids (cluster_count entries)
+// and the early and late software raster cluster ids (cluster_count entries each).
+#define WORK_HEADER 16u
 layout(set = 0, binding = 5, std430) restrict coherent buffer Work {
 	uint data[];
 }
@@ -90,9 +95,9 @@ visibility;
 layout(set = 1, binding = 0) uniform sampler2D hzb;
 #endif
 
-// Camera clusters, camera triangles, shadow clusters, shadow triangles.
+// Camera clusters, camera triangles, shadow clusters, shadow triangles, software clusters, software triangles.
 layout(set = 0, binding = 2, std430) restrict buffer Stats {
-	uint data[4];
+	uint data[6];
 }
 stats;
 
@@ -206,6 +211,12 @@ void main() {
 		queue_tail = 1u;
 		work.data[3] = 0u;
 		work.data[WORK_HEADER] = 0u;
+		work.data[8] = 0u;
+		work.data[9] = 1u;
+		work.data[10] = 1u;
+		work.data[11] = 0u;
+		work.data[12] = 1u;
+		work.data[13] = 1u;
 		if ((params.flags & FLAG_OCCLUSION_PHASE1) != 0u) {
 			work.data[5] = work.data[4];
 		} else {
@@ -274,6 +285,28 @@ void main() {
 
 #else
 
+// Clusters whose bounding sphere projects smaller than the limit (in pixels, divided by the pixel error like lod_scale)
+// are rasterized in compute. Clusters touching the near plane always stay on the hardware rasterizer.
+bool use_software(Cluster c, float scale) {
+	if ((params.flags & (FLAG_SOFTWARE | FLAG_HIERARCHY)) != (FLAG_SOFTWARE | FLAG_HIERARCHY) || (params.flags & FLAG_ORTHOGONAL) != 0u) {
+		return false;
+	}
+	vec3 center = to_view(c.cull_sphere.xyz);
+	float radius = c.cull_sphere.w * scale;
+	float near = params.projection[3][2] / (params.projection[2][2] - 1.0);
+	float closest = -center.z - radius;
+	if (closest <= near) {
+		return false;
+	}
+	float limit = float(params.flags >> 16u) / 16.0;
+	return 2.0 * radius * params.lod_scale < limit * closest;
+}
+
+void append_software(uint p_index, uint p_list, uint p_counter) {
+	uint slot = atomicAdd(work.data[p_counter], 1u);
+	work.data[WORK_HEADER + params.node_count + (1u + p_list) * params.cluster_count + slot] = p_index;
+}
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	if ((params.flags & FLAG_HIERARCHY) != 0u) {
@@ -302,10 +335,20 @@ void main() {
 		late.first_index = c.index_offset;
 		late.vertex_offset = 0;
 		late.first_instance = 0u;
-		commands.data[2u * params.cluster_count + atomicAdd(commands.counts[2], 1u)] = late;
+		bool software = use_software(c, scale);
+		if (software) {
+			append_software(index, 1u, 11u);
+			commands.data[4u * params.cluster_count + atomicAdd(commands.counts[4], 1u)] = late;
+		} else {
+			commands.data[2u * params.cluster_count + atomicAdd(commands.counts[2], 1u)] = late;
+		}
 		if ((params.flags & FLAG_STATS) != 0u) {
 			atomicAdd(stats.data[0], 1u);
 			atomicAdd(stats.data[1], c.index_count / 3u);
+			if (software) {
+				atomicAdd(stats.data[4], 1u);
+				atomicAdd(stats.data[5], c.index_count / 3u);
+			}
 		}
 	}
 	visibility.data[index] = now_visible ? 1u : 0u;
@@ -315,6 +358,8 @@ void main() {
 		visible = false;
 	}
 #endif
+
+	bool software = visible && use_software(c, scale);
 
 	DrawIndexedCommand cmd;
 	cmd.index_count = c.index_count;
@@ -327,6 +372,10 @@ void main() {
 			atomicAdd(stats.data[0], 1u);
 			atomicAdd(stats.data[1], c.index_count / 3u);
 		}
+		if (software) {
+			atomicAdd(stats.data[4], 1u);
+			atomicAdd(stats.data[5], c.index_count / 3u);
+		}
 		if (selected) {
 			atomicAdd(stats.data[2], 1u);
 			atomicAdd(stats.data[3], c.index_count / 3u);
@@ -335,7 +384,10 @@ void main() {
 
 	if ((params.flags & FLAG_COMPACT) != 0u) {
 		cmd.instance_count = 1u;
-		if (visible) {
+		if (software) {
+			append_software(index, 0u, 8u);
+			commands.data[3u * params.cluster_count + atomicAdd(commands.counts[3], 1u)] = cmd;
+		} else if (visible) {
 			commands.data[atomicAdd(commands.counts[0], 1u)] = cmd;
 		}
 		if (selected) {

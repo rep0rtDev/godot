@@ -48,8 +48,13 @@ public:
 	static constexpr uint32_t FLAG_OCCLUSION_PHASE1 = 8;
 	static constexpr uint32_t FLAG_FLIP_Y = 16;
 	static constexpr uint32_t FLAG_HIERARCHY = 32;
-	// Indirect dispatch size and candidate count of the hierarchical traversal, see create_work_buffer().
-	static constexpr uint32_t WORK_HEADER_SIZE = 32;
+	// Small camera clusters go to the compute rasterizer; the size limit is packed in the upper flag bits.
+	static constexpr uint32_t FLAG_SOFTWARE = 64;
+	static constexpr uint32_t SOFTWARE_LIMIT_SHIFT = 16;
+	// Traversal dispatch size, candidate count and the software raster dispatch sizes, see create_work_buffer().
+	static constexpr uint32_t WORK_HEADER_SIZE = 64;
+	static constexpr uint32_t WORK_SOFTWARE_EARLY_OFFSET = 8 * sizeof(uint32_t);
+	static constexpr uint32_t WORK_SOFTWARE_LATE_OFFSET = 11 * sizeof(uint32_t);
 
 	enum ShaderMode {
 		MODE_SELECT,
@@ -58,8 +63,10 @@ public:
 		MODE_INSTANCE_OCCLUSION,
 		MODE_MAX,
 	};
-	// Draw counts (camera, shadow, late camera) padded to 16 bytes, followed by the three command ranges.
-	static constexpr uint32_t HEADER_SIZE = 16;
+	// Draw counts (camera, shadow, late camera, software early, software late) padded to 32 bytes,
+	// followed by the five command ranges. The software ranges are only drawn by the color pass.
+	static constexpr uint32_t HEADER_SIZE = 32;
+	static constexpr uint32_t COMMAND_RANGES = 5;
 
 	struct PushConstant {
 		float modelview[12];
@@ -77,6 +84,8 @@ public:
 		STAT_TRIANGLES,
 		STAT_SHADOW_CLUSTERS,
 		STAT_SHADOW_TRIANGLES,
+		STAT_SOFTWARE_CLUSTERS,
+		STAT_SOFTWARE_TRIANGLES,
 		STAT_MAX,
 	};
 
@@ -98,6 +107,8 @@ private:
 
 	bool collect_stats = false;
 	bool supports_software_raster = false;
+	bool software_raster = false;
+	float software_raster_max_pixels = 64.0f;
 	RID stats_buffer;
 	uint64_t stats_frame = 0;
 	static SafeNumeric<uint64_t> stats[STAT_MAX];
@@ -121,6 +132,8 @@ public:
 	bool uses_indirect_count() const { return use_indirect_count; }
 	bool collects_stats() const { return collect_stats; }
 	bool can_rasterize_in_compute() const { return supports_software_raster; }
+	bool uses_software_raster() const { return software_raster; }
+	float get_software_raster_max_pixels() const { return software_raster_max_pixels; }
 
 	// Reads back the previous frame's counters and resets them; only the first call per frame does anything.
 	void begin_frame_stats(uint64_t p_frame);

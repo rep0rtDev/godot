@@ -377,8 +377,10 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 
 	const bool use_as_storage = (new_surface.skin_data.size() || mesh->blend_shape_count > 0);
 	const bool requested_storage_buffer = (new_surface.format & RSE::ARRAY_FLAG_USE_STORAGE_BUFFER);
-	const BitField<RD::BufferCreationBits> as_storage_flag = (use_as_storage || requested_storage_buffer) ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0;
-	const BitField<RD::BufferCreationBits> requested_storage_flag = requested_storage_buffer ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0;
+	// Virtual geometry rasterizes small clusters in compute, reading positions and indices directly.
+	const bool vg_storage = !new_surface.vg_cluster_data.is_empty();
+	const BitField<RD::BufferCreationBits> as_storage_flag = (use_as_storage || requested_storage_buffer || vg_storage) ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0;
+	const BitField<RD::BufferCreationBits> requested_storage_flag = (requested_storage_buffer || vg_storage) ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0;
 
 	if (new_surface.vertex_data.size()) {
 		// If we have an uncompressed surface that contains normals, but not tangents, we need to differentiate the array

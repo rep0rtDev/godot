@@ -3602,6 +3602,12 @@
 		<member name="rendering/virtual_geometry/pixel_error" type="float" setter="" getter="" default="1.0">
 			Maximum projected simplification error, in pixels, allowed when the renderer selects levels of detail for meshes using [constant Mesh.ARRAY_FLAG_USE_VIRTUAL_GEOMETRY]. Lower values keep more detail at the cost of more triangles.
 		</member>
+		<member name="rendering/virtual_geometry/software_raster" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], virtual geometry clusters that project smaller than [member rendering/virtual_geometry/software_raster_max_pixels] are rasterized by a compute shader into a 64-bit visibility buffer instead of the hardware rasterizer during the depth pre-pass. Requires a device with 64-bit storage buffer atomics and indirect count draws. Experimental.
+		</member>
+		<member name="rendering/virtual_geometry/software_raster_max_pixels" type="float" setter="" getter="" default="64.0">
+			Largest projected bounding sphere diameter, in pixels at a [member rendering/virtual_geometry/pixel_error] of 1, of a cluster handled by the compute rasterizer when [member rendering/virtual_geometry/software_raster] is enabled.
+		</member>
 		<member name="rendering/vrs/mode" type="int" setter="" getter="" default="0">
 			Set the default Variable Rate Shading (VRS) mode for the main viewport. See [member Viewport.vrs_mode] to change this at runtime, and [enum Viewport.VRSMode] for possible values.
 		</member>

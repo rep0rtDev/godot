@@ -64,6 +64,8 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 	use_indirect_count = RD::get_singleton()->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT);
 	collect_stats = GLOBAL_GET("rendering/virtual_geometry/debug/collect_statistics");
 	supports_software_raster = use_indirect_count && RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
+	software_raster = supports_software_raster && bool(GLOBAL_GET("rendering/virtual_geometry/software_raster"));
+	software_raster_max_pixels = GLOBAL_GET("rendering/virtual_geometry/software_raster_max_pixels");
 	print_verbose(vformat("Virtual geometry: indirect count draws %s, buffer int64 atomics %s, statistics %s.", use_indirect_count ? "enabled" : "disabled", supports_software_raster ? "supported" : "unsupported", collect_stats ? "enabled" : "disabled"));
 
 	Vector<uint8_t> zero;
@@ -170,7 +172,8 @@ RID VirtualGeometryEffect::get_shader(ShaderMode p_mode) const {
 
 RID VirtualGeometryEffect::create_work_buffer(uint32_t p_node_count, uint32_t p_cluster_count) const {
 	Vector<uint8_t> zero;
-	zero.resize_initialized(WORK_HEADER_SIZE + sizeof(uint32_t) * (p_node_count + p_cluster_count));
+	// Header, traversal queue, candidates, then the early and late software raster lists.
+	zero.resize_initialized(WORK_HEADER_SIZE + sizeof(uint32_t) * (p_node_count + 3 * p_cluster_count));
 	return RD::get_singleton()->storage_buffer_create(zero.size(), zero, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 }
 
@@ -182,7 +185,7 @@ RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluste
 
 	// Leaves are packed first so the initial contents are valid for both the compacted and the per-slot layout.
 	Vector<uint8_t> data;
-	data.resize(HEADER_SIZE + cluster_count * 3 * COMMAND_STRIDE);
+	data.resize(HEADER_SIZE + cluster_count * COMMAND_RANGES * COMMAND_STRIDE);
 	memset(data.ptrw(), 0, data.size());
 	uint32_t *header = reinterpret_cast<uint32_t *>(data.ptrw());
 	uint32_t *w = reinterpret_cast<uint32_t *>(data.ptrw() + HEADER_SIZE);

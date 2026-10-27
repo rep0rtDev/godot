@@ -634,6 +634,12 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					if (camera_range && p_params->vg_phase != 1) {
 						RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + 2 * range_size, surf->vg_command_buffer, sizeof(uint32_t) * 2, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 					}
+					// Clusters rasterized in compute already have depth; only the color pass shades them.
+					if (p_pass_mode == PASS_MODE_COLOR && virtual_geometry->uses_software_raster()) {
+						for (uint32_t range = 3; range < RendererRD::VirtualGeometryEffect::COMMAND_RANGES; range++) {
+							RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * range_size, surf->vg_command_buffer, sizeof(uint32_t) * range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+						}
+					}
 				} else {
 					RD::get_singleton()->draw_list_draw_indirect(draw_list, true, surf->vg_command_buffer, offset, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 				}
@@ -4417,6 +4423,10 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 	const bool compact = virtual_geometry->uses_indirect_count();
 	if (compact) {
 		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_COMPACT;
+	}
+	if (virtual_geometry->uses_software_raster()) {
+		const float limit = virtual_geometry->get_software_raster_max_pixels() / MAX(virtual_geometry->get_pixel_error(), 0.01f);
+		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_SOFTWARE | (uint32_t(CLAMP(limit * 16.0f, 0.0f, 65535.0f)) << RendererRD::VirtualGeometryEffect::SOFTWARE_LIMIT_SHIFT);
 	}
 
 	if (p_occlusion) {
