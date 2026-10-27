@@ -453,7 +453,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 				// We already have a depth from the depth pre-pass, there is no need to write it again.
 				// In addition we can use COMPARE_OP_EQUAL instead of COMPARE_OP_LESS_OR_EQUAL.
 				// This way we can use the early depth test to discard transparent fragments before the fragment shader even starts.
-				depth_stencil_state.depth_compare_operator = RD::COMPARE_OP_EQUAL;
+				depth_stencil_state.depth_compare_operator = p_pipeline_key.depth_greater_equal ? RD::COMPARE_OP_GREATER_OR_EQUAL : RD::COMPARE_OP_EQUAL;
 				depth_stencil_state.enable_depth_write = false;
 			}
 		}

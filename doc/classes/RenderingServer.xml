@@ -6321,6 +6321,12 @@
 		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME" value="13" enum="RenderingInfo">
 			Number of virtual geometry triangles selected for shadow and other non-camera passes, counted once per selection. See [constant RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME].
 		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME" value="14" enum="RenderingInfo">
+			Number of camera virtual geometry clusters whose depth was rasterized by the compute rasterizer. They are included in [constant RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME]. Always [code]0[/code] unless [member ProjectSettings.rendering/virtual_geometry/software_raster] is enabled.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME" value="15" enum="RenderingInfo">
+			Number of triangles in [constant RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME].
+		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.
 		</constant>

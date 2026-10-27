@@ -321,7 +321,7 @@ uint64_t RenderingServerDefault::get_rendering_info(RSE::RenderingInfo p_info) {
 		return RSG::canvas_render->get_pipeline_compilations(RSE::PIPELINE_SOURCE_DRAW) + RSG::scene->get_pipeline_compilations(RSE::PIPELINE_SOURCE_DRAW);
 	} else if (p_info == RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION) {
 		return RSG::canvas_render->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION) + RSG::scene->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION);
-	} else if (p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME || p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME || p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME) {
+	} else if (p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME || p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME || p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME || p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME || p_info == RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME) {
 		return RSG::scene->get_virtual_geometry_info(p_info);
 	}
 	return RSG::utilities->get_rendering_info(p_info);

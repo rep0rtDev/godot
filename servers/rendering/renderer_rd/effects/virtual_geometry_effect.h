@@ -32,6 +32,8 @@
 
 #include "core/templates/safe_refcount.h"
 #include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_hzb.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_raster.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_resolve.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_select.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -78,6 +80,20 @@ public:
 	};
 	static_assert(sizeof(PushConstant) == 128);
 
+	struct RasterPushConstant {
+		float model_view_projection[16];
+		uint32_t size[2];
+		uint32_t list_offset;
+		uint32_t flags;
+		uint32_t slot;
+		uint32_t entry_capacity;
+		uint32_t pad[2];
+	};
+	static_assert(sizeof(RasterPushConstant) == 96);
+	static constexpr uint32_t RASTER_FLAG_INDEX_16 = 1;
+	// Rasterized clusters per frame; each visibility buffer id holds the entry in 25 bits.
+	static constexpr uint32_t ENTRY_CAPACITY = 1 << 20;
+
 	// GPU counters: camera clusters, camera triangles, shadow clusters, shadow triangles.
 	enum Stat {
 		STAT_CLUSTERS,
@@ -111,6 +127,23 @@ private:
 	float software_raster_max_pixels = 64.0f;
 	RID stats_buffer;
 	uint64_t stats_frame = 0;
+
+	struct ResolvePushConstant {
+		uint32_t size[2];
+		float bias;
+		uint32_t pad;
+	};
+	VirtualGeometryRasterShaderRD raster_shader;
+	RID raster_shader_version;
+	RID raster_pipeline;
+	VirtualGeometryResolveShaderRD resolve_shader;
+	RID resolve_shader_version;
+	HashMap<RD::FramebufferFormatID, RID> resolve_pipelines;
+	RID visibility_buffer;
+	Size2i visibility_size;
+	RID entry_buffer;
+	RID raster_frame_uniform_set;
+	RID resolve_uniform_set;
 	static SafeNumeric<uint64_t> stats[STAT_MAX];
 	static void _stats_received(const Vector<uint8_t> &p_data);
 
@@ -134,6 +167,15 @@ public:
 	bool can_rasterize_in_compute() const { return supports_software_raster; }
 	bool uses_software_raster() const { return software_raster; }
 	float get_software_raster_max_pixels() const { return software_raster_max_pixels; }
+
+	// Allocates and clears the 64-bit visibility buffer and the entry table for this frame.
+	void begin_software_raster(const Size2i &p_size);
+	RID get_raster_pipeline() const { return raster_pipeline; }
+	// Set 1 of the raster shader: visibility buffer and entry table.
+	RID get_raster_frame_uniform_set() const { return raster_frame_uniform_set; }
+	RID create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_vertex_buffer, RID p_index_buffer) const;
+	// Writes the depth of every rasterized pixel into p_framebuffer's depth attachment.
+	void resolve_software_depth(RID p_framebuffer);
 
 	// Reads back the previous frame's counters and resets them; only the first call per frame does anything.
 	void begin_frame_stats(uint64_t p_frame);

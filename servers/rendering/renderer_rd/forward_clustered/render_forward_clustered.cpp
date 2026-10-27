@@ -634,10 +634,35 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					if (camera_range && p_params->vg_phase != 1) {
 						RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + 2 * range_size, surf->vg_command_buffer, sizeof(uint32_t) * 2, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 					}
-					// Clusters rasterized in compute already have depth; only the color pass shades them.
-					if (p_pass_mode == PASS_MODE_COLOR && virtual_geometry->uses_software_raster()) {
-						for (uint32_t range = 3; range < RendererRD::VirtualGeometryEffect::COMMAND_RANGES; range++) {
-							RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * range_size, surf->vg_command_buffer, sizeof(uint32_t) * range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+					// Clusters rasterized in compute already have depth; only the color pass shades them. Their resolved
+					// depth is pushed slightly back, so they need GREATER_OR_EQUAL instead of the pre-pass EQUAL test.
+					if (p_pass_mode == PASS_MODE_COLOR && virtual_geometry_software && surf->vg_raster_uniform_set.is_valid()) {
+						SceneShaderForwardClustered::ShaderData::PipelineKey software_key = pipeline_key;
+						software_key.depth_greater_equal = true;
+						RID software_pipeline;
+						while (true) {
+							software_pipeline = shader->pipeline_hash_map.get_pipeline(software_key, software_key.hash(), software_key.ubershader, software_key.ubershader ? RSE::PIPELINE_SOURCE_DRAW : RSE::PIPELINE_SOURCE_SPECIALIZATION);
+							if (software_pipeline.is_valid() || software_key.ubershader) {
+								break;
+							}
+							// The specialized pipeline is still compiling; the ubershader takes its constants from the push constant.
+							software_key.ubershader = 1;
+						}
+						if (software_pipeline.is_valid()) {
+							size_t software_push_constant_size = sizeof(SceneState::PushConstant) - sizeof(SceneState::PushConstantUbershader);
+							if (software_key.ubershader) {
+								software_push_constant_size = sizeof(SceneState::PushConstant);
+								push_constant.ubershader.specialization = pipeline_specialization;
+								push_constant.ubershader.constants = {};
+								push_constant.ubershader.constants.cull_mode = cull_mode;
+							}
+							RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, software_pipeline);
+							RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, software_push_constant_size);
+							for (uint32_t range = 3; range < RendererRD::VirtualGeometryEffect::COMMAND_RANGES; range++) {
+								RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * range_size, surf->vg_command_buffer, sizeof(uint32_t) * range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+							}
+							// Make the next element rebind its own pipeline.
+							prev_shader = nullptr;
 						}
 					}
 				} else {
@@ -2228,7 +2253,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
 
 	const bool vg_occlusion = virtual_geometry && virtual_geometry->uses_occlusion_culling() && depth_pre_pass && !use_msaa && rb.is_valid() && p_render_data->scene_data->view_count == 1 && !is_reflection_probe && !p_render_data->scene_data->cam_orthogonal;
-	_virtual_geometry_select(p_render_data, vg_occlusion);
+	// The compute rasterizer only produces depth, so it needs a plain depth pre-pass to write into.
+	const bool vg_software = virtual_geometry && virtual_geometry->uses_software_raster() && depth_pre_pass && depth_pass_mode == PASS_MODE_DEPTH && !use_msaa && rb.is_valid() && p_render_data->scene_data->view_count == 1 && !is_reflection_probe && !p_render_data->scene_data->cam_orthogonal;
+	_virtual_geometry_select(p_render_data, vg_occlusion, vg_software);
 
 	if (depth_pre_pass) { //depth pre pass
 		bool needs_pre_resolve = _needs_post_prepass_render(p_render_data, using_sdfgi || using_voxelgi);
@@ -2255,6 +2282,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();
+
+		if (vg_software) {
+			RD::get_singleton()->draw_command_begin_label("Rasterize Virtual Geometry (Compute)");
+			_virtual_geometry_raster(p_render_data, false, depth_framebuffer);
+			RD::get_singleton()->draw_command_end_label();
+		}
 
 		if (use_msaa) {
 			RENDER_TIMESTAMP("Resolve Depth Pre-Pass (MSAA)");
@@ -2289,6 +2322,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			RenderListParameters late_params(virtual_geometry_late_elements.ptr(), virtual_geometry_late_element_info.ptr(), virtual_geometry_late_elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 			late_params.vg_phase = 2;
 			_render_list_with_draw_list(&late_params, depth_framebuffer, RD::DRAW_DEFAULT_ALL, depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
+			RD::get_singleton()->draw_command_end_label();
+		}
+		if (vg_software) {
+			RD::get_singleton()->draw_command_begin_label("Rasterize Virtual Geometry Late (Compute)");
+			_virtual_geometry_raster(p_render_data, true, depth_framebuffer);
 			RD::get_singleton()->draw_command_end_label();
 		}
 	}
@@ -4358,6 +4396,11 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 		RD::get_singleton()->free_rid(p_surface->vg_instance_uniform_set);
 	}
 	p_surface->vg_instance_uniform_set = RID();
+	if (p_surface->vg_raster_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_raster_uniform_set)) {
+		RD::get_singleton()->free_rid(p_surface->vg_raster_uniform_set);
+	}
+	p_surface->vg_raster_uniform_set = RID();
+	p_surface->vg_raster_flags = 0;
 	if (p_surface->vg_work_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(p_surface->vg_work_buffer);
 		p_surface->vg_work_buffer = RID();
@@ -4388,6 +4431,11 @@ void RenderForwardClustered::_virtual_geometry_fill_push_constant(RendererRD::Vi
 	} else {
 		r_push_constant.flags &= ~RendererRD::VirtualGeometryEffect::FLAG_HIERARCHY;
 	}
+	if (virtual_geometry_software && p_surface->vg_raster_uniform_set.is_valid()) {
+		r_push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_SOFTWARE;
+	} else {
+		r_push_constant.flags &= ~RendererRD::VirtualGeometryEffect::FLAG_SOFTWARE;
+	}
 }
 
 void RenderForwardClustered::_virtual_geometry_dispatch(RD::ComputeListID p_compute_list, const GeometryInstanceSurfaceDataCache *p_surface) {
@@ -4398,11 +4446,13 @@ void RenderForwardClustered::_virtual_geometry_dispatch(RD::ComputeListID p_comp
 	}
 }
 
-void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion) {
+void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion, bool p_software) {
 	virtual_geometry_camera_surface_count = 0;
+	virtual_geometry_software = false;
 	if (!virtual_geometry) {
 		return;
 	}
+	virtual_geometry_software = p_software;
 	virtual_geometry_pass++;
 
 	const Transform3D view = p_render_data->scene_data->cam_transform.affine_inverse();
@@ -4424,9 +4474,9 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 	if (compact) {
 		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_COMPACT;
 	}
-	if (virtual_geometry->uses_software_raster()) {
+	if (p_software) {
 		const float limit = virtual_geometry->get_software_raster_max_pixels() / MAX(virtual_geometry->get_pixel_error(), 0.01f);
-		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_SOFTWARE | (uint32_t(CLAMP(limit * 16.0f, 0.0f, 65535.0f)) << RendererRD::VirtualGeometryEffect::SOFTWARE_LIMIT_SHIFT);
+		push_constant.flags |= uint32_t(CLAMP(limit * 16.0f, 0.0f, 65535.0f)) << RendererRD::VirtualGeometryEffect::SOFTWARE_LIMIT_SHIFT;
 	}
 
 	if (p_occlusion) {
@@ -4501,6 +4551,48 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 		_virtual_geometry_dispatch(compute_list, surf);
 	}
 	RD::get_singleton()->compute_list_end();
+}
+
+void RenderForwardClustered::_virtual_geometry_raster(const RenderDataRD *p_render_data, bool p_late, RID p_depth_framebuffer) {
+	if (virtual_geometry_camera_surface_count == 0) {
+		return;
+	}
+	const Size2i size = p_render_data->render_buffers->get_internal_size();
+	if (!p_late) {
+		virtual_geometry->begin_software_raster(size);
+	}
+	const Projection projection = p_render_data->scene_data->get_cam_projection();
+
+	RendererRD::VirtualGeometryEffect::RasterPushConstant push_constant = {};
+	push_constant.size[0] = size.x;
+	push_constant.size[1] = size.y;
+	push_constant.entry_capacity = RendererRD::VirtualGeometryEffect::ENTRY_CAPACITY;
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_raster_pipeline());
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, virtual_geometry->get_raster_frame_uniform_set(), 1);
+	for (uint32_t i = 0; i < virtual_geometry_camera_surface_count; i++) {
+		GeometryInstanceSurfaceDataCache *surf = virtual_geometry_surfaces[i];
+		if (!surf->vg_raster_uniform_set.is_valid()) {
+			continue;
+		}
+		const Projection mvp = projection * Projection(virtual_geometry_view * surf->owner->transform);
+		for (int c = 0; c < 4; c++) {
+			for (int r = 0; r < 4; r++) {
+				push_constant.model_view_projection[c * 4 + r] = mvp.columns[c][r];
+			}
+		}
+		// Work buffer: header, traversal queue, candidates, early list, late list.
+		push_constant.list_offset = RendererRD::VirtualGeometryEffect::WORK_HEADER_SIZE / sizeof(uint32_t) + surf->vg_node_count + (p_late ? 2 : 1) * surf->vg_cluster_count;
+		push_constant.flags = surf->vg_raster_flags;
+		push_constant.slot = i;
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_raster_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		RD::get_singleton()->compute_list_dispatch_indirect(compute_list, surf->vg_work_buffer, p_late ? RendererRD::VirtualGeometryEffect::WORK_SOFTWARE_LATE_OFFSET : RendererRD::VirtualGeometryEffect::WORK_SOFTWARE_EARLY_OFFSET);
+	}
+	RD::get_singleton()->compute_list_end();
+
+	virtual_geometry->resolve_software_depth(p_depth_framebuffer);
 }
 
 bool RenderForwardClustered::_virtual_geometry_occlusion(const RenderDataRD *p_render_data) {
@@ -4649,6 +4741,11 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 			sdcache->vg_traverse_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_TRAVERSE);
 			sdcache->vg_instance_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_INSTANCE_OCCLUSION);
 			sdcache->vg_node_count = vg_node_count;
+			const uint64_t vg_format = mesh_storage->mesh_surface_get_format(sdcache->surface);
+			if (virtual_geometry->uses_software_raster() && !(vg_format & (RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES | RSE::ARRAY_FLAG_USE_2D_VERTICES))) {
+				sdcache->vg_raster_uniform_set = virtual_geometry->create_raster_uniform_set(vg_cluster_buffer, sdcache->vg_work_buffer, mesh_storage->mesh_surface_get_vertex_buffer(sdcache->surface), mesh_storage->mesh_surface_get_index_buffer(sdcache->surface));
+				sdcache->vg_raster_flags = mesh_storage->mesh_surface_has_16_bit_indices(sdcache->surface) ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_INDEX_16 : 0;
+			}
 		}
 		sdcache->vg_cluster_count = vg_cluster_count;
 	}
@@ -5448,6 +5545,10 @@ uint64_t RenderForwardClustered::get_virtual_geometry_info(RSE::RenderingInfo p_
 			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_TRIANGLES);
 		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME:
 			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SHADOW_TRIANGLES);
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME:
+			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SOFTWARE_CLUSTERS);
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME:
+			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SOFTWARE_TRIANGLES);
 		default:
 			return 0;
 	}

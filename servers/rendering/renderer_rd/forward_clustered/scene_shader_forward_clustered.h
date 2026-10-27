@@ -200,6 +200,8 @@ public:
 			ShaderSpecialization shader_specialization = {};
 			uint32_t wireframe = false;
 			uint32_t ubershader = false;
+			// Opaque color pass over depth that came from a resolve rather than this pipeline's own pre-pass.
+			uint32_t depth_greater_equal = false;
 
 			uint32_t hash() const {
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
@@ -213,6 +215,7 @@ public:
 				h = hash_murmur3_one_32(shader_specialization.packed_2, h);
 				h = hash_murmur3_one_32(wireframe, h);
 				h = hash_murmur3_one_32(ubershader, h);
+				h = hash_murmur3_one_32(depth_greater_equal, h);
 				return hash_fmix32(h);
 			}
 		};

@@ -46,6 +46,20 @@ func _init() -> void:
 		wall.position = Vector3((side - 1) * 1.5 - side * 0.375, 2, 3)
 		root.add_child(wall)
 	wall_off = int(arg("wall_off", "-1"))
+	if arg("backdrop", "0") == "1":
+		# Transparent plane behind the grid. The transparent pass depth-tests against the finished opaque depth,
+		# so it covers any pixel whose depth was lost, regardless of draw order.
+		var backdrop := MeshInstance3D.new()
+		var quad := QuadMesh.new()
+		quad.size = Vector2(200, 200)
+		var mat := StandardMaterial3D.new()
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.albedo_color = Color(1, 0, 0, 0.5)
+		quad.material = mat
+		backdrop.mesh = quad
+		backdrop.position = Vector3(0, 0, -(side + 2) * 3.0)
+		root.add_child(backdrop)
 	var light := DirectionalLight3D.new()
 	light.shadow_enabled = arg("shadows", "1") == "1"
 	light.rotation_degrees = Vector3(-50, 30, 0)
@@ -53,6 +67,10 @@ func _init() -> void:
 	cam = Camera3D.new()
 	cam.position = Vector3(side * 1.5, 6, 8)
 	cam.rotation_degrees = Vector3(-15, 0, 0)
+	if arg("view", "grid") == "row":
+		# Low camera looking down the columns, so spheres hide each other (depth resolve and occlusion checks).
+		cam.position = Vector3(1.5, 0.4, 6)
+		cam.rotation_degrees = Vector3(-2, 0, 0)
 	root.add_child(cam)
 	get_root().add_child(root)
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
@@ -84,6 +102,9 @@ func _process(_delta: float) -> bool:
 		if shot != "":
 			get_root().get_texture().get_image().save_png(shot)
 		print("RESULT frame_ms avg=%.3f p50=%.3f p95=%.3f gpu_ms avg=%.3f p50=%.3f device=%s" % [avg, times[times.size() / 2], times[int(times.size() * 0.95)], gavg, gpu_times[gpu_times.size() / 2], RenderingServer.get_video_adapter_name()])
+		print("RESULT vg_sw_clusters=%d vg_sw_tris=%d" % [
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME)])
 		print("RESULT vg_clusters=%d vg_tris=%d vg_shadow_tris=%d total_prims=%d draw_calls=%d" % [
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME),
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME),

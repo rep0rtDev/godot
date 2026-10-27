@@ -85,6 +85,16 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
 	}
 
+	if (supports_software_raster) {
+		Vector<String> raster_modes;
+		raster_modes.push_back("");
+		raster_shader.initialize(raster_modes);
+		raster_shader_version = raster_shader.version_create();
+		raster_pipeline = RD::get_singleton()->compute_pipeline_create(raster_shader.version_get_shader(raster_shader_version, 0));
+		resolve_shader.initialize(raster_modes);
+		resolve_shader_version = resolve_shader.version_create();
+	}
+
 	Vector<String> hzb_modes;
 	hzb_modes.push_back("\n#define MODE_FROM_DEPTH\n");
 	hzb_modes.push_back("");
@@ -161,6 +171,19 @@ RID VirtualGeometryEffect::create_visibility_buffer(uint32_t p_cluster_count) co
 }
 
 VirtualGeometryEffect::~VirtualGeometryEffect() {
+	for (const KeyValue<RD::FramebufferFormatID, RID> &E : resolve_pipelines) {
+		RD::get_singleton()->free_rid(E.value);
+	}
+	if (visibility_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(visibility_buffer);
+	}
+	if (entry_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(entry_buffer);
+	}
+	if (raster_shader_version.is_valid()) {
+		raster_shader.version_free(raster_shader_version);
+		resolve_shader.version_free(resolve_shader_version);
+	}
 	hzb_shader.version_free(hzb_shader_version);
 	RD::get_singleton()->free_rid(stats_buffer);
 	shader.version_free(shader_version);
@@ -252,4 +275,77 @@ RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_comman
 		uniforms.push_back(u);
 	}
 	return RD::get_singleton()->uniform_set_create(uniforms, get_shader(p_mode), 0);
+}
+
+void VirtualGeometryEffect::begin_software_raster(const Size2i &p_size) {
+	ERR_FAIL_COND(!supports_software_raster);
+	RD *rd = RD::get_singleton();
+	const uint32_t visibility_size_bytes = uint32_t(p_size.x) * uint32_t(p_size.y) * sizeof(uint64_t);
+	if (visibility_buffer.is_null() || visibility_size != p_size) {
+		if (visibility_buffer.is_valid()) {
+			rd->free_rid(visibility_buffer);
+		}
+		visibility_buffer = rd->storage_buffer_create(visibility_size_bytes);
+		visibility_size = p_size;
+		raster_frame_uniform_set = RID();
+		resolve_uniform_set = RID();
+	}
+	if (entry_buffer.is_null()) {
+		entry_buffer = rd->storage_buffer_create(sizeof(uint32_t) * 2 + sizeof(uint32_t) * 2 * ENTRY_CAPACITY);
+	}
+	rd->buffer_clear(visibility_buffer, 0, visibility_size_bytes);
+	rd->buffer_clear(entry_buffer, 0, sizeof(uint32_t) * 2);
+
+	if (!raster_frame_uniform_set.is_valid() || !rd->uniform_set_is_valid(raster_frame_uniform_set)) {
+		Vector<RD::Uniform> uniforms;
+		RD::Uniform u_visibility(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, visibility_buffer);
+		uniforms.push_back(u_visibility);
+		RD::Uniform u_entries(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, entry_buffer);
+		uniforms.push_back(u_entries);
+		raster_frame_uniform_set = rd->uniform_set_create(uniforms, raster_shader.version_get_shader(raster_shader_version, 0), 1);
+	}
+}
+
+RID VirtualGeometryEffect::create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_vertex_buffer, RID p_index_buffer) const {
+	ERR_FAIL_COND_V(!supports_software_raster, RID());
+	Vector<RD::Uniform> uniforms;
+	const RID buffers[4] = { p_cluster_buffer, p_work_buffer, p_vertex_buffer, p_index_buffer };
+	for (uint32_t i = 0; i < 4; i++) {
+		RD::Uniform u(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, buffers[i]);
+		uniforms.push_back(u);
+	}
+	return RD::get_singleton()->uniform_set_create(uniforms, const_cast<VirtualGeometryRasterShaderRD &>(raster_shader).version_get_shader(raster_shader_version, 0), 0);
+}
+
+void VirtualGeometryEffect::resolve_software_depth(RID p_framebuffer) {
+	ERR_FAIL_COND(visibility_buffer.is_null());
+	RD *rd = RD::get_singleton();
+	RID shader_rd = resolve_shader.version_get_shader(resolve_shader_version, 0);
+	const RD::FramebufferFormatID format = rd->framebuffer_get_format(p_framebuffer);
+	RID *pipeline = resolve_pipelines.getptr(format);
+	if (!pipeline) {
+		RD::PipelineDepthStencilState depth_state;
+		depth_state.enable_depth_test = true;
+		depth_state.enable_depth_write = true;
+		depth_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
+		pipeline = &resolve_pipelines.insert(format, rd->render_pipeline_create(shader_rd, format, RD::INVALID_ID, RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), depth_state, RD::PipelineColorBlendState::create_disabled(0), 0))->value;
+	}
+	if (!resolve_uniform_set.is_valid() || !rd->uniform_set_is_valid(resolve_uniform_set)) {
+		Vector<RD::Uniform> uniforms;
+		RD::Uniform u(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, visibility_buffer);
+		uniforms.push_back(u);
+		resolve_uniform_set = rd->uniform_set_create(uniforms, shader_rd, 0);
+	}
+
+	ResolvePushConstant push_constant = {};
+	push_constant.size[0] = visibility_size.x;
+	push_constant.size[1] = visibility_size.y;
+	push_constant.bias = 1.0f / 65536.0f;
+
+	RD::DrawListID draw_list = rd->draw_list_begin(p_framebuffer, RD::DRAW_DEFAULT_ALL);
+	rd->draw_list_bind_render_pipeline(draw_list, *pipeline);
+	rd->draw_list_bind_uniform_set(draw_list, resolve_uniform_set, 0);
+	rd->draw_list_set_push_constant(draw_list, &push_constant, sizeof(push_constant));
+	rd->draw_list_draw(draw_list, false, 1, 3);
+	rd->draw_list_end();
 }

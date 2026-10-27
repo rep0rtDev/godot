@@ -575,6 +575,9 @@ private:
 		RID vg_work_buffer;
 		RID vg_traverse_uniform_set;
 		RID vg_instance_uniform_set;
+		// Compute rasterization of small clusters: reads this surface's positions and indices.
+		RID vg_raster_uniform_set;
+		uint32_t vg_raster_flags = 0;
 		uint32_t vg_node_count = 0;
 		uint32_t vg_cluster_count = 0;
 		uint64_t vg_last_pass = 0;
@@ -793,7 +796,10 @@ private:
 	LocalVector<GeometryInstanceSurfaceDataCache *> virtual_geometry_late_elements;
 	LocalVector<RenderElementInfo> virtual_geometry_late_element_info;
 
-	void _virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion);
+	void _virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion, bool p_software);
+	// Rasterizes the early or late software list of every camera surface, then writes the result into p_depth_framebuffer.
+	void _virtual_geometry_raster(const RenderDataRD *p_render_data, bool p_late, RID p_depth_framebuffer);
+	bool virtual_geometry_software = false;
 	void _virtual_geometry_fill_push_constant(RendererRD::VirtualGeometryEffect::PushConstant &r_push_constant, const Transform3D &p_view, const GeometryInstanceSurfaceDataCache *p_surface) const;
 	void _virtual_geometry_dispatch(RD::ComputeListID p_compute_list, const GeometryInstanceSurfaceDataCache *p_surface);
 	bool _virtual_geometry_occlusion(const RenderDataRD *p_render_data);
