@@ -112,6 +112,7 @@ public:
 	float get_surface_lod_size(int p_surface, int p_lod) const;
 	Ref<Material> get_surface_material(int p_surface) const;
 	uint64_t get_surface_format(int p_surface) const;
+	void set_surface_format(int p_surface, uint64_t p_flags);
 
 	void set_surface_material(int p_surface, const Ref<Material> &p_material);
 

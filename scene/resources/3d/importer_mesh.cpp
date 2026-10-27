@@ -432,6 +432,12 @@ uint64_t ImporterMesh::get_surface_format(int p_surface) const {
 	return surfaces[p_surface].flags;
 }
 
+void ImporterMesh::set_surface_format(int p_surface, uint64_t p_flags) {
+	ERR_FAIL_INDEX(p_surface, surfaces.size());
+	surfaces.write[p_surface].flags = p_flags;
+	mesh.unref();
+}
+
 Ref<Material> ImporterMesh::get_surface_material(int p_surface) const {
 	ERR_FAIL_INDEX_V(p_surface, surfaces.size(), Ref<Material>());
 	return surfaces[p_surface].material;
