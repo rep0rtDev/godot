@@ -1039,6 +1039,8 @@ public:
 		SUPPORTS_RASTERIZATION_RATE_MAP,
 		SUPPORTS_GPU_MAPPABLE_BUFFER,
 		SUPPORTS_DRAW_INDIRECT_COUNT,
+		// 64-bit integer atomics on storage buffers (atomicMax on uint64_t), used by compute rasterization.
+		SUPPORTS_BUFFER_INT64_ATOMICS,
 	};
 
 	enum SubgroupOperations {

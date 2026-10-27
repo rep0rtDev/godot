@@ -97,6 +97,7 @@ private:
 	bool use_indirect_count = false;
 
 	bool collect_stats = false;
+	bool supports_software_raster = false;
 	RID stats_buffer;
 	uint64_t stats_frame = 0;
 	static SafeNumeric<uint64_t> stats[STAT_MAX];
@@ -119,6 +120,7 @@ public:
 	float get_pixel_error() const { return pixel_error; }
 	bool uses_indirect_count() const { return use_indirect_count; }
 	bool collects_stats() const { return collect_stats; }
+	bool can_rasterize_in_compute() const { return supports_software_raster; }
 
 	// Reads back the previous frame's counters and resets them; only the first call per frame does anything.
 	void begin_frame_stats(uint64_t p_frame);

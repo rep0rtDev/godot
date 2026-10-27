@@ -63,7 +63,8 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 	pixel_error = GLOBAL_GET("rendering/virtual_geometry/pixel_error");
 	use_indirect_count = RD::get_singleton()->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT);
 	collect_stats = GLOBAL_GET("rendering/virtual_geometry/debug/collect_statistics");
-	print_verbose(vformat("Virtual geometry: indirect count draws %s, statistics %s.", use_indirect_count ? "enabled" : "disabled", collect_stats ? "enabled" : "disabled"));
+	supports_software_raster = use_indirect_count && RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
+	print_verbose(vformat("Virtual geometry: indirect count draws %s, buffer int64 atomics %s, statistics %s.", use_indirect_count ? "enabled" : "disabled", supports_software_raster ? "supported" : "unsupported", collect_stats ? "enabled" : "disabled"));
 
 	Vector<uint8_t> zero;
 	zero.resize_initialized(sizeof(uint32_t) * STAT_MAX);

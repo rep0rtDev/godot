@@ -1051,6 +1051,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			}
 			// The core 1.2 entry points are used; enabling the extension makes the functionality available.
 			draw_indirect_count_support = enabled_device_extension_names.has(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME) && device_features_vk_1_2.drawIndirectCount;
+			buffer_int64_atomics_support = device_features_vk_1_2.shaderBufferInt64Atomics && physical_device_features.shaderInt64;
 			if (enabled_device_extension_names.has(VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME)) {
 				vulkan_memory_model_support = device_features_vk_1_2.vulkanMemoryModel;
 				vulkan_memory_model_device_scope_support = device_features_vk_1_2.vulkanMemoryModelDeviceScope;
@@ -1383,6 +1384,14 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		buffer_device_address_features.pNext = create_info_next;
 		buffer_device_address_features.bufferDeviceAddress = buffer_device_address_support;
 		create_info_next = &buffer_device_address_features;
+	}
+
+	VkPhysicalDeviceShaderAtomicInt64Features atomic_int64_features = {};
+	if (buffer_int64_atomics_support) {
+		atomic_int64_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES;
+		atomic_int64_features.pNext = create_info_next;
+		atomic_int64_features.shaderBufferInt64Atomics = VK_TRUE;
+		create_info_next = &atomic_int64_features;
 	}
 
 	VkPhysicalDeviceVulkanMemoryModelFeaturesKHR vulkan_memory_model_features = {};
@@ -7480,6 +7489,8 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			return buffer_device_address_support;
 		case SUPPORTS_DRAW_INDIRECT_COUNT:
 			return draw_indirect_count_support;
+		case SUPPORTS_BUFFER_INT64_ATOMICS:
+			return buffer_int64_atomics_support;
 		case SUPPORTS_IMAGE_ATOMIC_32_BIT:
 #if (defined(MACOS_ENABLED) || defined(APPLE_EMBEDDED_ENABLED))
 			// MoltenVK has previously had issues with 32-bit atomics on images.
