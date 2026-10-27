@@ -641,7 +641,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 						// Default-transform opaque materials shade their software pixels straight from the visibility buffer.
 						const bool material_pass = surf->vg_material_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(surf->vg_material_uniform_set) &&
 								pipeline_key.color_pass_flags == 0 && !shader->uses_vertex && !shader->uses_position && !shader->writes_modelview_or_projection &&
-								!shader->uses_world_coordinates && !shader->uses_particle_trails && !shader->uses_point_size && !shader->uses_z_clip_scale;
+								!shader->uses_world_coordinates && !shader->uses_particle_trails && !shader->uses_point_size && !shader->uses_z_clip_scale &&
+								// The pass runs the material once per triangle of a pixel quad, so it must not discard.
+								!shader->uses_discard && !shader->uses_alpha_clip && !shader->uses_alpha_antialiasing && !shader->uses_depth_prepass_alpha;
 						if (material_pass) {
 							software_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_VG_MATERIAL;
 							software_key.vertex_format_id = RD::INVALID_ID;

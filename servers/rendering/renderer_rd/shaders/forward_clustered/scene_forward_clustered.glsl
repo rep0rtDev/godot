@@ -3340,27 +3340,36 @@ void fragment_shader(in SceneData scene_data) {
 
 void main() {
 #ifdef MODE_VG_MATERIAL
-	vg_material_setup(scene_data_block.data);
+	uint vg_count = vg_quad_setup();
+	vec4 vg_color = vec4(0.0);
+	// One material evaluation per distinct triangle of the quad; each lane keeps the one of its own triangle.
+	for (uint vg_i = 0u; vg_i < vg_count; vg_i++) {
+		vg_material_eval(scene_data_block.data, vg_quad_triangles[vg_i]);
 #endif
-#ifdef UBERSHADER
-	bool front_facing = FRONT_FACING_VALUE;
-	if (uc_cull_mode() == POLYGON_CULL_BACK && !front_facing) {
-		discard;
-	} else if (uc_cull_mode() == POLYGON_CULL_FRONT && front_facing) {
-		discard;
-	}
+#if defined(UBERSHADER) && !defined(MODE_VG_MATERIAL)
+		bool front_facing = FRONT_FACING_VALUE;
+		if (uc_cull_mode() == POLYGON_CULL_BACK && !front_facing) {
+			discard;
+		} else if (uc_cull_mode() == POLYGON_CULL_FRONT && front_facing) {
+			discard;
+		}
 #endif
 #ifdef MODE_DUAL_PARABOLOID
 
-	if (dp_clip > 0.0) {
-		discard;
-	}
+		if (dp_clip > 0.0) {
+			discard;
+		}
 #endif
 
-	fragment_shader(scene_data_block.data);
+		fragment_shader(scene_data_block.data);
 #ifdef MODE_VG_MATERIAL
-	if (vg_quad_helper) {
+		if (vg_quad_triangles[vg_i].x == vg_own_triangle) {
+			vg_color = frag_color;
+		}
+	}
+	if (vg_own_triangle == VG_NO_TRIANGLE) {
 		discard;
 	}
+	frag_color = vg_color;
 #endif
 }

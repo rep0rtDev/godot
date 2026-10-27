@@ -87,10 +87,6 @@ float vg_cross2(vec2 a, vec2 b) {
 	return a.x * b.y - a.y * b.x;
 }
 
-// Set when this pixel belongs to another surface (or none) but still has to run the material so that its
-// 2x2 quad neighbors get valid derivatives. Such pixels are discarded after the material code ran.
-bool vg_quad_helper = false;
-
 bool vg_pixel_visible(ivec2 p_pixel, out uvec2 r_visibility, out uvec2 r_entry) {
 	if (any(lessThan(p_pixel, ivec2(0))) || any(greaterThanEqual(p_pixel, ivec2(vg_surface.size)))) {
 		return false;
@@ -103,23 +99,51 @@ bool vg_pixel_visible(ivec2 p_pixel, out uvec2 r_visibility, out uvec2 r_entry) 
 	return r_entry.x == vg_surface.slot;
 }
 
-void vg_material_setup(in SceneData scene_data) {
-	ivec2 pixel = ivec2(gl_FragCoord.xy);
-	uvec2 visibility;
-	uvec2 entry;
-	if (!vg_pixel_visible(pixel, visibility, entry)) {
-		// Extrapolate the triangle of a quad neighbor of this surface, if any, instead of leaving garbage
-		// in the derivatives of the visible pixels.
-		if (!vg_pixel_visible(pixel ^ ivec2(1, 0), visibility, entry) && !vg_pixel_visible(pixel ^ ivec2(0, 1), visibility, entry) && !vg_pixel_visible(pixel ^ ivec2(1, 1), visibility, entry)) {
-			discard;
-		}
-		vg_quad_helper = true;
-	}
-	// Same value the depth resolve wrote; the GREATER_OR_EQUAL test rejects pixels where other geometry is in front.
-	gl_FragDepth = uintBitsToFloat(visibility.y) * (1.0 - vg_surface.depth_bias);
+#define VG_NO_TRIANGLE 0xFFFFFFFFu
 
-	VGCluster cluster = vg_clusters.data[entry.y];
-	uint first = cluster.index_offset + (visibility.x & 127u) * 3u;
+// Distinct triangles of this surface inside the pixel's 2x2 quad, as (visibility id, cluster). Every lane of
+// the quad reads the same four pixels, so all lanes agree on the list and its order, and the material can be
+// run once per triangle with the whole quad extrapolating that triangle, like a hardware quad. That keeps
+// texture derivatives valid across silhouettes and UV seams.
+uvec2 vg_quad_triangles[4];
+uint vg_own_triangle = VG_NO_TRIANGLE;
+
+uint vg_quad_setup() {
+	ivec2 pixel = ivec2(gl_FragCoord.xy);
+	ivec2 base = pixel & ~ivec2(1);
+	uint count = 0u;
+	gl_FragDepth = 0.0;
+	for (int i = 0; i < 4; i++) {
+		ivec2 q = base + ivec2(i & 1, i >> 1);
+		uvec2 visibility;
+		uvec2 entry;
+		if (!vg_pixel_visible(q, visibility, entry)) {
+			continue;
+		}
+		if (q == pixel) {
+			vg_own_triangle = visibility.x;
+			// Same value the depth resolve wrote; the GREATER_OR_EQUAL test rejects pixels where other geometry is in front.
+			gl_FragDepth = uintBitsToFloat(visibility.y) * (1.0 - vg_surface.depth_bias);
+		}
+		bool found = false;
+		for (uint j = 0u; j < count; j++) {
+			found = found || vg_quad_triangles[j].x == visibility.x;
+		}
+		if (!found) {
+			vg_quad_triangles[count] = uvec2(visibility.x, entry.y);
+			count++;
+		}
+	}
+	if (count == 0u) {
+		discard;
+	}
+	return count;
+}
+
+// Rebuilds the interpolated vertex outputs of triangle p_triangle at this pixel (extrapolated if it lies outside).
+void vg_material_eval(in SceneData scene_data, uvec2 p_triangle) {
+	VGCluster cluster = vg_clusters.data[p_triangle.y];
+	uint first = cluster.index_offset + (p_triangle.x & 127u) * 3u;
 	uint ids[3] = uint[](vg_fetch_index(first), vg_fetch_index(first + 1u), vg_fetch_index(first + 2u));
 
 	uint instance_index = draw_call.instance_index;
