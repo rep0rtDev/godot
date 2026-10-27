@@ -64,6 +64,7 @@ public:
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) = 0;
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) = 0;
+	virtual uint64_t get_virtual_geometry_info(RSE::RenderingInfo p_info) { return 0; }
 
 	/* SDFGI UPDATE */
 

@@ -6282,6 +6282,16 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 }
 
 void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	_draw_list_draw_indirect(p_list, p_use_indices, p_buffer, p_offset, p_draw_count, p_stride, RID(), 0);
+}
+
+void RenderingDevice::draw_list_draw_indexed_indirect_count(DrawListID p_list, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_DRAW_INDIRECT_COUNT), "Indirect count draws are not supported by this device.");
+	ERR_FAIL_COND(p_count_buffer.is_null());
+	_draw_list_draw_indirect(p_list, true, p_buffer, p_offset, p_max_draw_count, p_stride, p_count_buffer, p_count_offset);
+}
+
+void RenderingDevice::_draw_list_draw_indirect(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride, RID p_count_buffer, uint32_t p_count_offset) {
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
@@ -6290,6 +6300,14 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 	ERR_FAIL_NULL(buffer);
 
 	ERR_FAIL_COND_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "Buffer provided was not created to do indirect dispatch.");
+
+	Buffer *count_buffer = nullptr;
+	if (p_count_buffer.is_valid()) {
+		count_buffer = storage_buffer_owner.get_or_null(p_count_buffer);
+		ERR_FAIL_NULL(count_buffer);
+		ERR_FAIL_COND_MSG(!count_buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "Count buffer provided was not created to do indirect dispatch.");
+		ERR_FAIL_COND_MSG(p_count_offset + 4 > count_buffer->size, "Count offset provided (+4) is past the end of the count buffer.");
+	}
 
 #ifdef DEBUG_ENABLED
 	ERR_FAIL_COND_MSG(!draw_list.validation.pipeline_active,
@@ -6374,7 +6392,11 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 
 		ERR_FAIL_COND_MSG(p_offset + 20 > buffer->size, "Offset provided (+20) is past the end of buffer.");
 
-		draw_graph.add_draw_list_draw_indexed_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+		if (count_buffer) {
+			draw_graph.add_draw_list_draw_indexed_indirect_count(buffer->driver_id, p_offset, count_buffer->driver_id, p_count_offset, p_draw_count, p_stride);
+		} else {
+			draw_graph.add_draw_list_draw_indexed_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+		}
 	} else {
 		ERR_FAIL_COND_MSG(p_offset + 16 > buffer->size, "Offset provided (+16) is past the end of buffer.");
 
@@ -6386,8 +6408,14 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 	if (buffer->draw_tracker != nullptr) {
 		draw_graph.add_draw_list_usage(buffer->draw_tracker, RDG::RESOURCE_USAGE_INDIRECT_BUFFER_READ);
 	}
+	if (count_buffer && count_buffer != buffer && count_buffer->draw_tracker != nullptr) {
+		draw_graph.add_draw_list_usage(count_buffer->draw_tracker, RDG::RESOURCE_USAGE_INDIRECT_BUFFER_READ);
+	}
 
 	_check_transfer_worker_buffer(buffer);
+	if (count_buffer && count_buffer != buffer) {
+		_check_transfer_worker_buffer(count_buffer);
+	}
 }
 
 void RenderingDevice::draw_list_set_viewport(DrawListID p_list, const Rect2i &p_rect) {

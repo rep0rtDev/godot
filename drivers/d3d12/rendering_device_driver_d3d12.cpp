@@ -6111,6 +6111,8 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return true;
 		case SUPPORTS_BUFFER_DEVICE_ADDRESS:
 			return shader_capabilities.buffer_device_address_supported();
+		case SUPPORTS_DRAW_INDIRECT_COUNT:
+			return false;
 		case SUPPORTS_IMAGE_ATOMIC_32_BIT:
 			return true;
 		case SUPPORTS_VULKAN_MEMORY_MODEL:

@@ -35,13 +35,24 @@ struct DrawIndexedCommand {
 	uint first_instance;
 };
 
-// [0, cluster_count): camera pass (LOD + frustum). [cluster_count, 2 * cluster_count): shadow and auxiliary passes (LOD only).
-layout(set = 0, binding = 1, std430) restrict writeonly buffer Commands {
+// Commands [0, cluster_count): camera pass (LOD + frustum). [cluster_count, 2 * cluster_count): shadow and auxiliary passes (LOD only).
+// With FLAG_COMPACT the selected clusters are packed at the start of each range and counts[] holds the draw count
+// (cleared to zero before dispatch). Otherwise every cluster keeps its own slot and rejected ones get zero instances.
+layout(set = 0, binding = 1, std430) restrict buffer Commands {
+	uint counts[4];
 	DrawIndexedCommand data[];
 }
 commands;
 
 #define FLAG_ORTHOGONAL 1u
+#define FLAG_COMPACT 2u
+#define FLAG_STATS 4u
+
+// Camera clusters, camera triangles, shadow clusters, shadow triangles.
+layout(set = 0, binding = 2, std430) restrict buffer Stats {
+	uint data[4];
+}
+stats;
 
 layout(push_constant, std430) uniform Params {
 	vec4 modelview[3]; // Rows of the object to view space affine transform.
@@ -102,12 +113,33 @@ void main() {
 
 	DrawIndexedCommand cmd;
 	cmd.index_count = c.index_count;
-	cmd.instance_count = visible ? 1u : 0u;
 	cmd.first_index = c.index_offset;
 	cmd.vertex_offset = 0;
 	cmd.first_instance = 0u;
-	commands.data[index] = cmd;
 
-	cmd.instance_count = selected ? 1u : 0u;
-	commands.data[params.cluster_count + index] = cmd;
+	if ((params.flags & FLAG_STATS) != 0u) {
+		if (visible) {
+			atomicAdd(stats.data[0], 1u);
+			atomicAdd(stats.data[1], c.index_count / 3u);
+		}
+		if (selected) {
+			atomicAdd(stats.data[2], 1u);
+			atomicAdd(stats.data[3], c.index_count / 3u);
+		}
+	}
+
+	if ((params.flags & FLAG_COMPACT) != 0u) {
+		cmd.instance_count = 1u;
+		if (visible) {
+			commands.data[atomicAdd(commands.counts[0], 1u)] = cmd;
+		}
+		if (selected) {
+			commands.data[params.cluster_count + atomicAdd(commands.counts[1], 1u)] = cmd;
+		}
+	} else {
+		cmd.instance_count = visible ? 1u : 0u;
+		commands.data[index] = cmd;
+		cmd.instance_count = selected ? 1u : 0u;
+		commands.data[params.cluster_count + index] = cmd;
+	}
 }

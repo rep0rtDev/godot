@@ -6312,6 +6312,15 @@
 		<constant name="RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION" value="10" enum="RenderingInfo">
 			Number of pipeline compilations that were triggered to optimize the current scene. These compilations are done in the background and should not cause any stutters whatsoever.
 		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME" value="11" enum="RenderingInfo">
+			Number of virtual geometry clusters drawn by camera passes, as selected on the GPU. Only collected when [member ProjectSettings.rendering/virtual_geometry/debug/collect_statistics] is enabled. The value lags a few frames behind because it is read back asynchronously.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME" value="12" enum="RenderingInfo">
+			Number of virtual geometry triangles drawn by camera passes. See [constant RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME].
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME" value="13" enum="RenderingInfo">
+			Number of virtual geometry triangles selected for shadow and other non-camera passes, counted once per selection. See [constant RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME].
+		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.
 		</constant>

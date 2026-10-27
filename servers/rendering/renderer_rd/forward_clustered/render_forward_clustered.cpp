@@ -30,6 +30,7 @@
 
 #include "render_forward_clustered.h"
 
+#include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -623,8 +624,12 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			} else if (use_virtual_geometry) {
 				// Camera-facing passes use the frustum-culled range; shadow and auxiliary passes the LOD-only range.
 				const bool camera_range = p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI;
-				const uint32_t offset = camera_range ? 0 : surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE;
-				RD::get_singleton()->draw_list_draw_indirect(draw_list, true, surf->vg_command_buffer, offset, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+				const uint32_t offset = RendererRD::VirtualGeometryEffect::HEADER_SIZE + (camera_range ? 0 : surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+				if (virtual_geometry->uses_indirect_count()) {
+					RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t), surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+				} else {
+					RD::get_singleton()->draw_list_draw_indirect(draw_list, true, surf->vg_command_buffer, offset, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+				}
 			} else if (indirect) {
 				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
 			} else {
@@ -4336,11 +4341,18 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 	}
 	push_constant.lod_scale = viewport_height * 0.5f * Math::abs(projection.columns[1][1]) / MAX(virtual_geometry->get_pixel_error(), 0.01f);
 	push_constant.flags = p_render_data->scene_data->cam_orthogonal ? RendererRD::VirtualGeometryEffect::FLAG_ORTHOGONAL : 0;
+	const bool compact = virtual_geometry->uses_indirect_count();
+	if (compact) {
+		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_COMPACT;
+	}
 
-	RD::ComputeListID compute_list = 0;
-	bool compute_list_open = false;
+	if (virtual_geometry->collects_stats()) {
+		virtual_geometry->begin_frame_stats(Engine::get_singleton()->get_frames_drawn() + 1);
+		push_constant.flags |= RendererRD::VirtualGeometryEffect::FLAG_STATS;
+	}
 
-	auto select_instances = [&](const PagedArray<RenderGeometryInstance *> &p_instances) {
+	virtual_geometry_surfaces.clear();
+	auto gather_instances = [&](const PagedArray<RenderGeometryInstance *> &p_instances) {
 		for (uint32_t i = 0; i < p_instances.size(); i++) {
 			GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>(p_instances[i]);
 			for (GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf; surf = surf->next) {
@@ -4348,12 +4360,33 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 					continue;
 				}
 				surf->vg_last_pass = virtual_geometry_pass;
-				if (!compute_list_open) {
-					compute_list = RD::get_singleton()->compute_list_begin();
-					RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline());
-					compute_list_open = true;
-				}
-				const Transform3D modelview = view * inst->transform;
+				virtual_geometry_surfaces.push_back(surf);
+			}
+		}
+	};
+
+	if (p_render_data->instances) {
+		gather_instances(*p_render_data->instances);
+	}
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		gather_instances(p_render_data->render_shadows[i].instances);
+	}
+	if (virtual_geometry_surfaces.is_empty()) {
+		return;
+	}
+
+	if (compact) {
+		for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
+			RD::get_singleton()->buffer_clear(surf->vg_command_buffer, 0, RendererRD::VirtualGeometryEffect::HEADER_SIZE);
+		}
+	}
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline());
+	{
+		for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
+			{
+				const Transform3D modelview = view * surf->owner->transform;
 				for (int r = 0; r < 3; r++) {
 					push_constant.modelview[r * 4 + 0] = modelview.basis.rows[r][0];
 					push_constant.modelview[r * 4 + 1] = modelview.basis.rows[r][1];
@@ -4366,18 +4399,8 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 				RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
 			}
 		}
-	};
-
-	if (p_render_data->instances) {
-		select_instances(*p_render_data->instances);
 	}
-	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
-		select_instances(p_render_data->render_shadows[i].instances);
-	}
-
-	if (compute_list_open) {
-		RD::get_singleton()->compute_list_end();
-	}
+	RD::get_singleton()->compute_list_end();
 }
 
 void RenderForwardClustered::_geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh) {
@@ -5262,6 +5285,19 @@ void RenderForwardClustered::mesh_generate_pipelines(RID p_mesh, bool p_backgrou
 	}
 }
 
+uint64_t RenderForwardClustered::get_virtual_geometry_info(RSE::RenderingInfo p_info) {
+	switch (p_info) {
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME:
+			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_CLUSTERS);
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME:
+			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_TRIANGLES);
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME:
+			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SHADOW_TRIANGLES);
+		default:
+			return 0;
+	}
+}
+
 uint32_t RenderForwardClustered::get_pipeline_compilations(RSE::PipelineSource p_source) {
 	return scene_shader.get_pipeline_compilations(p_source);
 }
@@ -5483,9 +5519,9 @@ RenderForwardClustered::RenderForwardClustered() {
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
 	ss_effects = memnew(RendererRD::SSEffects);
+	virtual_geometry = memnew(RendererRD::VirtualGeometryEffect);
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
-	virtual_geometry = memnew(RendererRD::VirtualGeometryEffect);
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
 #endif
 }

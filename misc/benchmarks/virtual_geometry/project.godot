@@ -5,3 +5,4 @@ config/name="vg_bench"
 
 [rendering]
 renderer/rendering_method="forward_plus"
+virtual_geometry/debug/collect_statistics=true

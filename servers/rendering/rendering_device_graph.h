@@ -87,6 +87,7 @@ public:
 			TYPE_DRAW_INDEXED,
 			TYPE_DRAW_INDIRECT,
 			TYPE_DRAW_INDEXED_INDIRECT,
+			TYPE_DRAW_INDEXED_INDIRECT_COUNT,
 			TYPE_EXECUTE_COMMANDS,
 			TYPE_NEXT_SUBPASS,
 			TYPE_SET_BLEND_CONSTANTS,
@@ -638,6 +639,15 @@ private:
 		uint32_t stride = 0;
 	};
 
+	struct DrawListDrawIndexedIndirectCountInstruction : DrawListInstruction {
+		RDD::BufferID buffer;
+		RDD::BufferID count_buffer;
+		uint32_t offset = 0;
+		uint32_t count_offset = 0;
+		uint32_t max_draw_count = 0;
+		uint32_t stride = 0;
+	};
+
 	struct DrawListEndRenderPassInstruction : DrawListInstruction {
 		// No contents.
 	};
@@ -937,6 +947,7 @@ public:
 	void add_draw_list_draw_indexed(uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index);
 	void add_draw_list_draw_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
 	void add_draw_list_draw_indexed_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
+	void add_draw_list_draw_indexed_indirect_count(RDD::BufferID p_buffer, uint32_t p_offset, RDD::BufferID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride);
 	void add_draw_list_execute_commands(RDD::CommandBufferID p_command_buffer);
 	void add_draw_list_next_subpass(RDD::CommandBufferType p_command_buffer_type);
 	void add_draw_list_set_blend_constants(const Color &p_color);

@@ -778,6 +778,7 @@ private:
 	RendererRD::MotionVectorsStore *motion_vectors_store = nullptr;
 	RendererRD::VirtualGeometryEffect *virtual_geometry = nullptr;
 	uint64_t virtual_geometry_pass = 0;
+	LocalVector<GeometryInstanceSurfaceDataCache *> virtual_geometry_surfaces;
 
 	void _virtual_geometry_select(const RenderDataRD *p_render_data);
 	void _geometry_instance_surface_free(GeometryInstanceSurfaceDataCache *p_surface);
@@ -871,6 +872,7 @@ public:
 
 	virtual void mesh_generate_pipelines(RID p_mesh, bool p_background_compilation) override;
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source) override;
+	virtual uint64_t get_virtual_geometry_info(RSE::RenderingInfo p_info) override;
 
 	/* SHADER LIBRARY */
 
