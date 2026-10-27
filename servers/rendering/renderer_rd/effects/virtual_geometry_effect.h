@@ -91,6 +91,9 @@ public:
 	};
 	static_assert(sizeof(RasterPushConstant) == 96);
 	static constexpr uint32_t RASTER_FLAG_INDEX_16 = 1;
+	// Drop triangles by the sign of their pixel space area, from the material cull mode.
+	static constexpr uint32_t RASTER_FLAG_CULL_POSITIVE = 2;
+	static constexpr uint32_t RASTER_FLAG_CULL_NEGATIVE = 4;
 	// Rasterized clusters per frame; each visibility buffer id holds the entry in 25 bits.
 	static constexpr uint32_t ENTRY_CAPACITY = 1 << 20;
 

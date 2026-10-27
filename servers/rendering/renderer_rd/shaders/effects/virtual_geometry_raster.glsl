@@ -57,6 +57,8 @@ layout(set = 1, binding = 1, std430) restrict buffer Entries {
 entries;
 
 #define FLAG_INDEX_16 1u
+#define FLAG_CULL_POSITIVE 2u
+#define FLAG_CULL_NEGATIVE 4u
 
 layout(push_constant, std430) uniform Params {
 	mat4 model_view_projection;
@@ -114,7 +116,7 @@ void main() {
 	vec3 v2 = project(fetch_index(first + 2u));
 
 	float area = edge(a.xy, b.xy, v2.xy);
-	if (area == 0.0) {
+	if (area == 0.0 || (params.flags & (area > 0.0 ? FLAG_CULL_POSITIVE : FLAG_CULL_NEGATIVE)) != 0u) {
 		return;
 	}
 	if (area < 0.0) {

@@ -4635,6 +4635,14 @@ void RenderForwardClustered::_virtual_geometry_raster(const RenderDataRD *p_rend
 		// Work buffer: header, traversal queue, candidates, early list, late list.
 		push_constant.list_offset = RendererRD::VirtualGeometryEffect::WORK_HEADER_SIZE / sizeof(uint32_t) + surf->vg_node_count + (p_late ? 2 : 1) * surf->vg_cluster_count;
 		push_constant.flags = surf->vg_raster_flags;
+		if (surf->shader) {
+			const RD::PolygonCullMode cull_mode = surf->shader->get_cull_mode_from_cull_variant(surf->owner->mirror ? SceneShaderForwardClustered::ShaderData::CULL_VARIANT_REVERSED : SceneShaderForwardClustered::ShaderData::CULL_VARIANT_NORMAL);
+			if (cull_mode == RD::POLYGON_CULL_BACK) {
+				push_constant.flags |= RendererRD::VirtualGeometryEffect::RASTER_FLAG_CULL_NEGATIVE;
+			} else if (cull_mode == RD::POLYGON_CULL_FRONT) {
+				push_constant.flags |= RendererRD::VirtualGeometryEffect::RASTER_FLAG_CULL_POSITIVE;
+			}
+		}
 		push_constant.slot = i;
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_raster_uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
