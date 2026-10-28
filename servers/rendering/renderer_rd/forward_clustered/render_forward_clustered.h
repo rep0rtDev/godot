@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/surface_cache_effect.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
+#include "servers/rendering/renderer_rd/effects/tsr.h"
 #include "servers/rendering/renderer_rd/effects/virtual_geometry_effect.h"
 #include "servers/rendering/renderer_rd/effects/virtual_shadows_effect.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
@@ -791,6 +792,7 @@ private:
 
 	RendererRD::TAA *taa = nullptr;
 	RendererRD::FSR2Effect *fsr2_effect = nullptr;
+	RendererRD::TSREffect *tsr_effect = nullptr;
 	RendererRD::SSEffects *ss_effects = nullptr;
 
 #ifdef METAL_MFXTEMPORAL_ENABLED

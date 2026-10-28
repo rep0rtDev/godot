@@ -174,6 +174,11 @@ func _init() -> void:
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
 		root.add_child(mmi)
+	var scaling := arg("scaling", "")
+	if scaling != "":
+		var modes := {"bilinear": Viewport.SCALING_3D_MODE_BILINEAR, "fsr": Viewport.SCALING_3D_MODE_FSR, "fsr2": Viewport.SCALING_3D_MODE_FSR2, "tsr": Viewport.SCALING_3D_MODE_TSR}
+		get_root().scaling_3d_mode = modes[scaling]
+		get_root().scaling_3d_scale = float(arg("scale", "0.5"))
 	wall_off = int(arg("wall_off", "-1"))
 	move_frame = int(arg("move", "-1"))
 	cam_move = float(arg("cam_move", "0"))

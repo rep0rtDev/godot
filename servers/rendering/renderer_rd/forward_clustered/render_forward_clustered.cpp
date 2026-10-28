@@ -1949,12 +1949,16 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	enum {
 		SCALE_NONE,
 		SCALE_FSR2,
+		SCALE_TSR,
 		SCALE_MFX,
 	} scale_type = SCALE_NONE;
 
 	switch (rb->get_scaling_3d_mode()) {
 		case RSE::VIEWPORT_SCALING_3D_MODE_FSR2:
 			scale_type = SCALE_FSR2;
+			break;
+		case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
+			scale_type = SCALE_TSR;
 			break;
 		case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL:
 #ifdef METAL_MFXTEMPORAL_ENABLED
@@ -2768,6 +2772,24 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	if (rb_data.is_valid() && (using_upscaling || using_taa)) {
+		if (scale_type == SCALE_TSR) {
+			rb->ensure_upscaled();
+			RD::get_singleton()->draw_command_begin_label("TSR");
+			RENDER_TIMESTAMP("TSR");
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				RendererRD::TSREffect::Parameters params;
+				params.color = rb->get_internal_texture(v);
+				params.depth = rb->get_depth_texture(v);
+				params.velocity = rb->get_velocity_buffer(false, v);
+				params.output = rb->get_upscaled_texture(v);
+				params.internal_size = rb->get_internal_size();
+				params.target_size = rb->get_target_size();
+				params.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+				params.sharpness = rb->get_fsr_sharpness();
+				tsr_effect->process(rb, params);
+			}
+			RD::get_singleton()->draw_command_end_label();
+		}
 		if (scale_type == SCALE_FSR2) {
 			rb_data->ensure_fsr2(fsr2_effect);
 
@@ -6146,6 +6168,7 @@ RenderForwardClustered::RenderForwardClustered() {
 
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
+	tsr_effect = memnew(RendererRD::TSREffect);
 	ss_effects = memnew(RendererRD::SSEffects);
 	virtual_geometry = memnew(RendererRD::VirtualGeometryEffect);
 	virtual_shadows = memnew(RendererRD::VirtualShadowsEffect);
@@ -6181,6 +6204,10 @@ RenderForwardClustered::~RenderForwardClustered() {
 	if (fsr2_effect) {
 		memdelete(fsr2_effect);
 		fsr2_effect = nullptr;
+	}
+	if (tsr_effect) {
+		memdelete(tsr_effect);
+		tsr_effect = nullptr;
 	}
 
 #ifdef METAL_MFXTEMPORAL_ENABLED
