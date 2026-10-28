@@ -1382,14 +1382,13 @@ vec3 encode24(vec3 v) {
 
 // Virtual shadow map lookup for directional light i: walks the clipmap from the level matching the pixel footprint
 // to coarser ones until a resident page is found. Returns false when none is (the regular shadow map is used then).
-bool vsm_directional_shadow(uint i, vec3 world, float view_z, float proj_y, float viewport_h, out float r_shadow) {
+float quick_hash(vec2 pos); // Defined in scene_forward_lights_inc.glsl.
+
+// Depth stored for light-space position lp at the first resident level from p_level. -1 when none.
+float vsm_directional_fetch(uint i, vec2 lp, int level, out int r_level, out ivec2 r_texel) {
 	vec4 params = directional_lights.data[i].vsm_params;
 	uvec4 info = directional_lights.data[i].vsm_info;
-	vec2 lp = (directional_lights.data[i].vsm_light_view * vec4(world, 1.0)).xy;
-	float ref = dot(directional_lights.data[i].vsm_depth_row, vec4(world, 1.0));
-	float footprint = view_z * 2.0 / (proj_y * viewport_h);
 	int levels = int(params.y);
-	int level = clamp(int(ceil(log2(footprint * 16384.0 / params.x))), 0, levels - 1);
 	for (; level < levels; level++) {
 		float page_size = params.x * float(1 << level) / 128.0;
 		vec2 pp = lp / page_size;
@@ -1400,32 +1399,81 @@ bool vsm_directional_shadow(uint i, vec3 world, float view_z, float proj_y, floa
 			continue;
 		}
 		uint phys = e.x >> 1u;
-		vec2 f = fract(pp) * 128.0;
 		ivec2 base = ivec2((phys % info.z) * 128u, (phys / info.z) * 128u);
-		ivec2 c = ivec2(f);
-		if (info.w == 2u) {
-			r_shadow = ref;
-			return true;
-		} else if (info.w == 3u) {
-			r_shadow = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), base + clamp(c, ivec2(0), ivec2(127)), 0).r;
-			return true;
-		} else if (info.w == 4u) {
-			r_shadow = float(level) / 16.0;
-			return true;
-		}
-		float lit = 0.0;
-		for (int dy = -1; dy <= 1; dy++) {
-			for (int dx = -1; dx <= 1; dx++) {
-				ivec2 t = clamp(c + ivec2(dx, dy), ivec2(0), ivec2(127));
-				float d = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), base + t, 0).r;
-				lit += ref > d ? 1.0 : 0.0;
-			}
-		}
-		r_shadow = lit / 9.0;
+		r_level = level;
+		r_texel = base + clamp(ivec2(fract(pp) * 128.0), ivec2(0), ivec2(127));
+		return texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), r_texel, 0).r;
+	}
+	r_level = levels;
+	r_texel = ivec2(0);
+	return -1.0;
+}
+
+// Shadow of the first directional light from its virtual pages. SMRT: rays toward the light disk are marched in
+// light space, a ray is blocked when a stored depth lies between the receiver and the sample. PCF 3x3 otherwise.
+bool vsm_directional_shadow(uint i, vec3 world, float view_z, float proj_y, float viewport_h, float taa_frame_count, out float r_shadow) {
+	vec4 params = directional_lights.data[i].vsm_params;
+	uvec4 info = directional_lights.data[i].vsm_info;
+	vec2 lp = (directional_lights.data[i].vsm_light_view * vec4(world, 1.0)).xy;
+	float ref = dot(directional_lights.data[i].vsm_depth_row, vec4(world, 1.0));
+	float footprint = view_z * 2.0 / (proj_y * viewport_h);
+	int levels = int(params.y);
+	int level = clamp(int(ceil(log2(footprint * 16384.0 / params.x))), 0, levels - 1);
+	int found;
+	ivec2 texel;
+	float d = vsm_directional_fetch(i, lp, level, found, texel);
+	if (d < 0.0) {
+		// No page yet (first frames after a jump): lit, the regular shadow map is not rendered for this light.
+		r_shadow = (info.w == 0u || info.w == 1u) ? 1.0 : 0.0;
 		return true;
 	}
-	// No page yet (first frames after a jump): lit, the regular shadow map is not rendered for this light.
-	r_shadow = (info.w == 0u || info.w == 1u) ? 1.0 : 0.0;
+	if (info.w == 2u) {
+		r_shadow = ref;
+		return true;
+	} else if (info.w == 3u) {
+		r_shadow = d;
+		return true;
+	} else if (info.w == 4u) {
+		r_shadow = float(found) / 16.0;
+		return true;
+	}
+	int rays = int(params.z);
+	float angle = directional_lights.data[i].softshadow_angle;
+	if (rays > 0 && angle > 0.0) {
+		// Depth per meter toward the light, from the depth row (z axis of the light frame).
+		float depth_per_m = length(directional_lights.data[i].vsm_depth_row.xyz);
+		float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
+		const float max_dist = 16.0;
+		const int steps = 8;
+		float blocked = 0.0;
+		for (int ray = 0; ray < rays; ray++) {
+			float a = r + float(ray) * 2.0 * M_PI / float(rays);
+			float rad = sqrt((float(ray) + 0.5) / float(rays));
+			vec2 dir = vec2(cos(a), sin(a)) * rad * angle;
+			for (int s = 1; s <= steps; s++) {
+				float dist = max_dist * (float(s) - 0.5 + 0.5 * quick_hash(vec2(gl_FragCoord.yx) + vec2(float(ray), float(s)))) / float(steps);
+				int l;
+				ivec2 t;
+				float sd = vsm_directional_fetch(i, lp + dir * dist, level, l, t);
+				if (sd > ref + dist * depth_per_m) {
+					blocked += 1.0;
+					break;
+				}
+			}
+		}
+		r_shadow = 1.0 - blocked / float(rays);
+		return true;
+	}
+	float lit = 0.0;
+	ivec2 page_base = (texel / 128) * 128; // Stay inside the page: neighbors in the pool are unrelated.
+	for (int dy = -1; dy <= 1; dy++) {
+		for (int dx = -1; dx <= 1; dx++) {
+			ivec2 t = page_base + clamp(texel - page_base + ivec2(dx, dy), ivec2(0), ivec2(127));
+			float sd = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), t, 0).r;
+			lit += ref > sd ? 1.0 : 0.0;
+		}
+	}
+	r_shadow = lit / 9.0;
 	return true;
 }
 
@@ -2876,7 +2924,7 @@ void fragment_shader(in SceneData scene_data) {
 						vsm_normal_bias -= light_dir * dot(light_dir, vsm_normal_bias);
 						vsm_v.xyz += vsm_normal_bias;
 						float vsm_shadow;
-						if (vsm_directional_shadow(i, (inv_view_matrix * vsm_v).xyz, depth_z, projection_matrix[1][1], scene_data.viewport_size.y, vsm_shadow)) {
+						if (vsm_directional_shadow(i, (inv_view_matrix * vsm_v).xyz, depth_z, projection_matrix[1][1], scene_data.viewport_size.y, scene_data.taa_frame_count, vsm_shadow)) {
 							shadow = vsm_shadow;
 						}
 					}

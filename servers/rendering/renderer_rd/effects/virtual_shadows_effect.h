@@ -93,6 +93,7 @@ private:
 
 	bool enabled = false;
 	uint32_t debug_mode = 0;
+	uint32_t smrt_rays = 4;
 	bool dumped = false;
 	float base_extent = 4.0f;
 	uint32_t pool_pages = 0;

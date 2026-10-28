@@ -320,7 +320,7 @@ half sample_directional_pcf_shadow(texture2D shadow, vec2 shadow_pixel_size, vec
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -347,7 +347,7 @@ half sample_pcf_shadow(texture2D shadow, vec2 shadow_pixel_size, vec3 coord, flo
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -373,7 +373,7 @@ half sample_omni_pcf_shadow(texture2D shadow, float blur_scale, vec2 coord, vec4
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -414,7 +414,7 @@ half sample_directional_soft_shadow(texture2D shadow, vec3 pssm_coord, vec2 tex_
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -527,7 +527,7 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 			mat2 disk_rotation;
 			{
-				float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+				float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
 				float sr = sin(r);
 				float cr = cos(r);
 				disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -767,21 +767,21 @@ vec2 normal_to_panorama(vec3 n) {
 #ifdef VIRTUAL_SHADOWS
 // Virtual shadow map lookup for spot light idx (v is the biased view-space position): walks the mips from the one
 // matching the pixel footprint to coarser ones until a resident page is found. Lit when none is.
-float vsm_spot_shadow(uint idx, vec4 v, float dist) {
-	vec4 params = spot_lights.data[idx].vsm_params;
+// Depth stored for the view-space position p in the pages of spot light idx, from mip on. -1 when none.
+float vsm_spot_fetch(uint idx, vec4 p, int mip, out float r_ref, out ivec2 r_texel) {
 	uvec4 info = spot_lights.data[idx].vsm_info;
-	vec4 clip = spot_lights.data[idx].vsm_matrix * v;
+	vec4 clip = spot_lights.data[idx].vsm_matrix * p;
+	r_texel = ivec2(0);
+	r_ref = 0.0;
 	if (clip.w <= 0.0) {
-		return 1.0;
+		return -1.0;
 	}
 	vec3 ndc = clip.xyz / clip.w;
 	if (any(greaterThan(abs(ndc.xy), vec2(1.0)))) {
-		return 1.0;
+		return -1.0;
 	}
-	float ref = ndc.z + spot_lights.data[idx].shadow_bias;
-	float footprint = -v.z * 2.0 / params.w; // params.w = projection[1][1] * viewport height
-	int mips = int(params.y);
-	int mip = clamp(int(ceil(log2(footprint * 16384.0 / (2.0 * dist * params.x)))), 0, mips - 1);
+	r_ref = ndc.z + spot_lights.data[idx].shadow_bias;
+	int mips = int(spot_lights.data[idx].vsm_params.y);
 	vec2 uv = ndc.xy * 0.5 + 0.5;
 	for (; mip < mips; mip++) {
 		float pages = float(128 >> mip);
@@ -792,19 +792,62 @@ float vsm_spot_shadow(uint idx, vec4 v, float dist) {
 			continue;
 		}
 		uint phys = e.x >> 1u;
-		ivec2 base = ivec2((phys % info.z) * 128u, (phys / info.z) * 128u);
-		ivec2 c = ivec2(fract(pp) * 128.0);
-		float lit = 0.0;
-		for (int dy = -1; dy <= 1; dy++) {
-			for (int dx = -1; dx <= 1; dx++) {
-				ivec2 t = clamp(c + ivec2(dx, dy), ivec2(0), ivec2(127));
-				float d = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), base + t, 0).r;
-				lit += ref > d ? 1.0 : 0.0;
+		r_texel = ivec2((phys % info.z) * 128u, (phys / info.z) * 128u) + clamp(ivec2(fract(pp) * 128.0), ivec2(0), ivec2(127));
+		return texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), r_texel, 0).r;
+	}
+	return -1.0;
+}
+
+// Virtual shadow map lookup for spot light idx (v is the biased view-space position). SMRT toward the light disk
+// when the light has a size, PCF 3x3 otherwise. Lit when no page is resident.
+float vsm_spot_shadow(uint idx, vec4 v, float dist, float taa_frame_count) {
+	vec4 params = spot_lights.data[idx].vsm_params;
+	float footprint = -v.z * 2.0 / params.w; // params.w = projection[1][1] * viewport height
+	int mips = int(params.y);
+	int mip = clamp(int(ceil(log2(footprint * 16384.0 / (2.0 * dist * params.x)))), 0, mips - 1);
+	float ref;
+	ivec2 texel;
+	float d = vsm_spot_fetch(idx, v, mip, ref, texel);
+	if (d < 0.0) {
+		return 1.0;
+	}
+	int rays = int(spot_lights.data[idx].vsm_info.x >> 8u);
+	float radius = spot_lights.data[idx].soft_shadow_size;
+	if (rays > 0 && radius > 0.0) {
+		vec3 to_light = spot_lights.data[idx].position - v.xyz;
+		vec3 dir = to_light / dist;
+		vec3 tx = normalize(abs(dir.y) < 0.9 ? cross(dir, vec3(0.0, 1.0, 0.0)) : cross(dir, vec3(1.0, 0.0, 0.0)));
+		vec3 ty = cross(dir, tx);
+		float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
+		const int steps = 8;
+		float blocked = 0.0;
+		for (int ray = 0; ray < rays; ray++) {
+			float a = r + float(ray) * 2.0 * M_PI / float(rays);
+			float rad = sqrt((float(ray) + 0.5) / float(rays)) * radius;
+			vec3 disk = (tx * cos(a) + ty * sin(a)) * rad;
+			for (int s = 1; s <= steps; s++) {
+				float t = (float(s) - 0.5 + 0.5 * quick_hash(vec2(gl_FragCoord.yx) + vec2(float(ray), float(s)))) / float(steps);
+				vec4 p = vec4(v.xyz + to_light * t + disk * t, 1.0);
+				float sref;
+				ivec2 st;
+				float sd = vsm_spot_fetch(idx, p, mip, sref, st);
+				if (sd > sref) {
+					blocked += 1.0;
+					break;
+				}
 			}
 		}
-		return lit / 9.0;
+		return 1.0 - blocked / float(rays);
 	}
-	return 1.0;
+	float lit = 0.0;
+	ivec2 page_base = (texel / 128) * 128; // Stay inside the page: neighbors in the pool are unrelated.
+	for (int dy = -1; dy <= 1; dy++) {
+		for (int dx = -1; dx <= 1; dx++) {
+			float sd = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), page_base + clamp(texel - page_base + ivec2(dx, dy), ivec2(0), ivec2(127)), 0).r;
+			lit += ref > sd ? 1.0 : 0.0;
+		}
+	}
+	return lit / 9.0;
 }
 #endif
 
@@ -865,7 +908,7 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 #ifdef VIRTUAL_SHADOWS
 		if (spot_lights.data[idx].vsm_info.x != 0u) {
-			shadow = mix(half(1.0), half(vsm_spot_shadow(idx, v, light_length)), half(spot_lights.data[idx].shadow_opacity));
+			shadow = mix(half(1.0), half(vsm_spot_shadow(idx, v, light_length, taa_frame_count)), half(spot_lights.data[idx].shadow_opacity));
 		} else
 #endif
 				if (sc_use_light_soft_shadows() && spot_lights.data[idx].soft_shadow_size > 0.0) {
@@ -881,7 +924,7 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 			mat2 disk_rotation;
 			{
-				float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+				float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
 				float sr = sin(r);
 				float cr = cos(r);
 				disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -1083,7 +1126,7 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 			mat2 disk_rotation;
 			{
-				float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+				float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
 				float sr = sin(r);
 				float cr = cos(r);
 				disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));

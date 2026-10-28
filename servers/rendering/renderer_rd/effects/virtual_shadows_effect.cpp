@@ -70,6 +70,7 @@ VirtualShadowsEffect::VirtualShadowsEffect() {
 		return;
 	}
 	debug_mode = GLOBAL_GET("rendering/virtual_shadows/debug/mode");
+	smrt_rays = GLOBAL_GET("rendering/virtual_shadows/smrt_rays");
 	base_extent = GLOBAL_GET("rendering/virtual_shadows/base_extent");
 	pool_pages = GLOBAL_GET("rendering/virtual_shadows/max_physical_pages");
 	windows_per_frame = GLOBAL_GET("rendering/virtual_shadows/windows_per_frame");
@@ -679,7 +680,7 @@ void VirtualShadowsEffect::fill_directional_light_data(RID p_light_instance, boo
 	}
 	r_params[0] = base_extent;
 	r_params[1] = LEVELS;
-	r_params[2] = 0.0f;
+	r_params[2] = float(smrt_rays);
 	r_params[3] = slot.normal_bias;
 	r_info[0] = 1;
 	r_info[1] = 0;
@@ -703,7 +704,7 @@ void VirtualShadowsEffect::fill_spot_light_data(RID p_light_instance, bool p_sha
 	r_params[1] = SPOT_MIPS;
 	r_params[2] = slot.normal_bias;
 	r_params[3] = p_pixel_scale;
-	r_info[0] = 1;
+	r_info[0] = 1u | (smrt_rays << 8);
 	r_info[1] = _slot_level(s, 0) * ENTRIES_PER_LEVEL;
 	r_info[2] = pool_cols;
 	r_info[3] = slot.version;

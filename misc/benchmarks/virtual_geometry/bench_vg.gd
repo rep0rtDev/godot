@@ -111,6 +111,8 @@ func _init() -> void:
 		spot.spot_angle = 50
 		spot.light_energy = 8
 		spot.shadow_enabled = true
+		spot.light_size = float(arg("spot_size", "0"))
+		spot.shadow_blur = 1.0
 		root.add_child(spot)
 	var side := int(ceil(sqrt(count)))
 	for i in count:
@@ -145,6 +147,7 @@ func _init() -> void:
 		backdrop.position = Vector3(0, 0, -(side + 2) * 3.0)
 		root.add_child(backdrop)
 	var light := DirectionalLight3D.new()
+	light.light_angular_distance = float(arg("soft", "0"))
 	light.shadow_enabled = arg("shadows", "1") == "1"
 	light.rotation_degrees = Vector3(-50, 30, 0)
 	root.add_child(light)
