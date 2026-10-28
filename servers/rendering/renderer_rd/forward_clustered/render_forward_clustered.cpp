@@ -2455,405 +2455,404 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 		}
 	}
-}
 
-if (current_cluster_builder) {
-	base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
-}
+	if (current_cluster_builder) {
+		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
+	}
 
-RENDER_TIMESTAMP("Render Opaque Pass");
+	RENDER_TIMESTAMP("Render Opaque Pass");
 
-RD::get_singleton()->draw_command_begin_label("Render Opaque Pass");
+	RD::get_singleton()->draw_command_begin_label("Render Opaque Pass");
 
-p_render_data->scene_data->directional_light_count = p_render_data->directional_light_count;
-p_render_data->scene_data->opaque_prepass_threshold = 0.0f;
+	p_render_data->scene_data->directional_light_count = p_render_data->directional_light_count;
+	p_render_data->scene_data->opaque_prepass_threshold = 0.0f;
 
-// Shadow pass can change the base uniform set samplers.
-_update_render_base_uniform_set();
+	// Shadow pass can change the base uniform set samplers.
+	_update_render_base_uniform_set();
 
-uint32_t opaque_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, true, using_motion_pass);
+	uint32_t opaque_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, true, using_motion_pass);
 
-RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, p_render_data, is_multiview, radiance_texture, samplers, opaque_pass_uniform_buffer_index, true);
-
-{
-	bool render_motion_pass = !render_list[RENDER_LIST_MOTION].elements.is_empty();
+	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, p_render_data, is_multiview, radiance_texture, samplers, opaque_pass_uniform_buffer_index, true);
 
 	{
-		Vector<Color> c;
-		if (!load_color) {
-			if (using_separate_specular || rb_data.is_valid()) {
-				// Effects that rely on separate specular, like subsurface scattering, must clear the alpha to zero.
-				clear_color.a = 0;
+		bool render_motion_pass = !render_list[RENDER_LIST_MOTION].elements.is_empty();
+
+		{
+			Vector<Color> c;
+			if (!load_color) {
+				if (using_separate_specular || rb_data.is_valid()) {
+					// Effects that rely on separate specular, like subsurface scattering, must clear the alpha to zero.
+					clear_color.a = 0;
+				}
+				c.push_back(clear_color);
+
+				if (rb_data.is_valid()) {
+					c.push_back(Color(0, 0, 0, 0)); // Separate specular.
+					c.push_back(Color(0, 0, 0, 0)); // Motion vector. Pushed to the clear color vector even if the framebuffer isn't bound.
+				}
 			}
-			c.push_back(clear_color);
 
-			if (rb_data.is_valid()) {
-				c.push_back(Color(0, 0, 0, 0)); // Separate specular.
-				c.push_back(Color(0, 0, 0, 0)); // Motion vector. Pushed to the clear color vector even if the framebuffer isn't bound.
-			}
+			uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
+			RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
+			RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_COLOR, opaque_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+			_render_list_with_draw_list(&render_list_params, opaque_framebuffer, RD::DrawFlags(load_color ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_COLOR_ALL) | (depth_pre_pass ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_DEPTH), c, 0.0f, 0u, p_render_data->render_region);
 		}
-
-		uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
-		RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
-		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_COLOR, opaque_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-		_render_list_with_draw_list(&render_list_params, opaque_framebuffer, RD::DrawFlags(load_color ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_COLOR_ALL) | (depth_pre_pass ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_DEPTH), c, 0.0f, 0u, p_render_data->render_region);
-	}
-
-	RD::get_singleton()->draw_command_end_label();
-
-	if (using_motion_pass) {
-		if (scale_type == SCALE_MFX) {
-			motion_vectors_store->process(rb,
-					p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
-					p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform);
-		} else {
-			Vector<Color> motion_vector_clear_colors;
-			motion_vector_clear_colors.push_back(Color(-1, -1, 0, 0));
-			RD::get_singleton()->draw_list_begin(rb_data->get_velocity_only_fb(), RD::DRAW_CLEAR_ALL, motion_vector_clear_colors);
-			RD::get_singleton()->draw_list_end();
-		}
-	}
-
-	if (render_motion_pass) {
-		RD::get_singleton()->draw_command_begin_label("Render Motion Pass");
-
-		RENDER_TIMESTAMP("Render Motion Pass");
-
-		rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_MOTION, p_render_data, is_multiview, radiance_texture, samplers, opaque_pass_uniform_buffer_index, true);
-
-		RenderListParameters render_list_params(render_list[RENDER_LIST_MOTION].elements.ptr(), render_list[RENDER_LIST_MOTION].element_info.ptr(), render_list[RENDER_LIST_MOTION].elements.size(), reverse_cull, PASS_MODE_COLOR, color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-		_render_list_with_draw_list(&render_list_params, color_framebuffer);
 
 		RD::get_singleton()->draw_command_end_label();
-	}
-}
 
-{
-	if (ce_post_opaque_resolved_color) {
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
-		}
-	}
-
-	if (ce_post_opaque_resolved_depth) {
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
-		}
-	}
-
-	RENDER_TIMESTAMP("Process Post Opaque Compositor Effects");
-	_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE, p_render_data);
-}
-
-if (debug_voxelgis) {
-	Projection dc;
-	dc.set_depth_correction(true);
-	Projection cm = (dc * p_render_data->scene_data->cam_projection) * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
-	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_only_framebuffer);
-	RD::get_singleton()->draw_command_begin_label("Debug VoxelGIs");
-	for (int i = 0; i < (int)p_render_data->voxel_gi_instances->size(); i++) {
-		gi.debug_voxel_gi((*p_render_data->voxel_gi_instances)[i], draw_list, color_only_framebuffer, cm, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION, 1.0);
-	}
-	RD::get_singleton()->draw_command_end_label();
-	RD::get_singleton()->draw_list_end();
-}
-
-if (debug_sdfgi_probes) {
-	Projection dc;
-	dc.set_depth_correction(true);
-	Projection cms[RendererSceneRender::MAX_RENDER_VIEWS];
-	for (uint32_t v = 0; v < p_render_data->scene_data->view_count; v++) {
-		cms[v] = (dc * p_render_data->scene_data->view_projection[v]) * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
-	}
-	_debug_sdfgi_probes(rb, color_only_framebuffer, p_render_data->scene_data->view_count, cms);
-}
-
-if (draw_sky || draw_sky_fog_only) {
-	RENDER_TIMESTAMP("Render Sky");
-
-	RD::get_singleton()->draw_command_begin_label("Draw Sky");
-	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_only_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 1.0f, 0u, p_render_data->render_region);
-
-	sky.draw_sky(draw_list, rb, p_render_data->environment, color_only_framebuffer, time, sky_luminance_multiplier, sky_brightness_multiplier);
-
-	RD::get_singleton()->draw_list_end();
-	RD::get_singleton()->draw_command_end_label();
-}
-
-if (use_msaa) {
-	RENDER_TIMESTAMP("Resolve MSAA");
-
-	if (scene_state.used_screen_texture || using_separate_specular || ce_pre_transparent_resolved_color) {
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
-		}
-		if (using_separate_specular) {
-			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-				RD::get_singleton()->texture_resolve_multisample(rb_data->get_specular_msaa(v), rb_data->get_specular(v));
+		if (using_motion_pass) {
+			if (scale_type == SCALE_MFX) {
+				motion_vectors_store->process(rb,
+						p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
+						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform);
+			} else {
+				Vector<Color> motion_vector_clear_colors;
+				motion_vector_clear_colors.push_back(Color(-1, -1, 0, 0));
+				RD::get_singleton()->draw_list_begin(rb_data->get_velocity_only_fb(), RD::DRAW_CLEAR_ALL, motion_vector_clear_colors);
+				RD::get_singleton()->draw_list_end();
 			}
 		}
-	}
 
-	if (scene_state.used_depth_texture || scene_state.used_normal_texture || using_separate_specular || ce_needs_normal_roughness || ce_pre_transparent_resolved_depth) {
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
+		if (render_motion_pass) {
+			RD::get_singleton()->draw_command_begin_label("Render Motion Pass");
+
+			RENDER_TIMESTAMP("Render Motion Pass");
+
+			rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_MOTION, p_render_data, is_multiview, radiance_texture, samplers, opaque_pass_uniform_buffer_index, true);
+
+			RenderListParameters render_list_params(render_list[RENDER_LIST_MOTION].elements.ptr(), render_list[RENDER_LIST_MOTION].element_info.ptr(), render_list[RENDER_LIST_MOTION].elements.size(), reverse_cull, PASS_MODE_COLOR, color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+			_render_list_with_draw_list(&render_list_params, color_framebuffer);
+
+			RD::get_singleton()->draw_command_end_label();
 		}
-	}
-}
-
-{
-	RENDER_TIMESTAMP("Process Post Sky Compositor Effects");
-	// Don't need to check for depth or color resolve here, we've already triggered it.
-	_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_SKY, p_render_data);
-}
-
-if (using_separate_specular) {
-	if (using_sss) {
-		RENDER_TIMESTAMP("Sub-Surface Scattering");
-		RD::get_singleton()->draw_command_begin_label("Process Sub-Surface Scattering");
-		_process_sss(rb, p_render_data->scene_data->cam_projection);
-		RD::get_singleton()->draw_command_end_label();
 	}
 
 	{
-		//just mix specular back
-		RENDER_TIMESTAMP("Merge Specular");
-		copy_effects->merge_specular(color_only_framebuffer, rb_data->get_specular(), !use_msaa ? RID() : rb->get_internal_texture(), RID(), p_render_data->scene_data->view_count);
-	}
-}
-
-if (using_separate_specular && is_environment(p_render_data->environment) && (environment_get_background(p_render_data->environment) == RSE::ENV_BG_CANVAS)) {
-	// Canvas background mode does not clear the color buffer, but copies over it. If screen-space specular effects are enabled and the background is blank,
-	// this results in ghosting due to the separate specular buffer copy. Need to explicitly clear the specular buffer once we're done with it to fix it.
-	RENDER_TIMESTAMP("Clear Separate Specular (Canvas Background Mode)");
-	Vector<Color> blank_clear_color;
-	blank_clear_color.push_back(Color(0.0, 0.0, 0.0));
-	RD::get_singleton()->draw_list_begin(rb_data->get_specular_only_fb(), RD::DRAW_CLEAR_ALL, blank_clear_color);
-	RD::get_singleton()->draw_list_end();
-}
-
-if (rb_data.is_valid() && using_upscaling) {
-	// Make sure the upscaled texture is initialized, but not necessarily filled, before running screen copies
-	// so it properly detect if a dedicated copy texture should be used.
-	rb->ensure_upscaled();
-}
-
-if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
-	RENDER_TIMESTAMP("Copy Screen Texture");
-
-	_render_buffers_ensure_screen_texture(p_render_data);
-
-	if (scene_state.used_screen_texture) {
-		// Copy screen texture to backbuffer so we can read from it
-		_render_buffers_copy_screen_texture(p_render_data);
-	}
-}
-
-if (scene_state.used_depth_texture || global_surface_data.depth_texture_used) {
-	RENDER_TIMESTAMP("Copy Depth Texture");
-
-	_render_buffers_ensure_depth_texture(p_render_data);
-
-	if (scene_state.used_depth_texture) {
-		// Copy depth texture to backbuffer so we can read from it
-		_render_buffers_copy_depth_texture(p_render_data);
-	}
-}
-
-{
-	if (using_separate_specular) {
-		// Our specular will be combined back in (and effects, subsurface scattering and/or ssr applied),
-		// so if we've requested this, we need another copy.
-		// Fairly unlikely scenario though.
-
-		if (ce_pre_transparent_resolved_color) {
+		if (ce_post_opaque_resolved_color) {
 			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 				RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
 			}
 		}
 
-		if (ce_pre_transparent_resolved_depth) {
+		if (ce_post_opaque_resolved_depth) {
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
+			}
+		}
+
+		RENDER_TIMESTAMP("Process Post Opaque Compositor Effects");
+		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE, p_render_data);
+	}
+
+	if (debug_voxelgis) {
+		Projection dc;
+		dc.set_depth_correction(true);
+		Projection cm = (dc * p_render_data->scene_data->cam_projection) * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+		RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_only_framebuffer);
+		RD::get_singleton()->draw_command_begin_label("Debug VoxelGIs");
+		for (int i = 0; i < (int)p_render_data->voxel_gi_instances->size(); i++) {
+			gi.debug_voxel_gi((*p_render_data->voxel_gi_instances)[i], draw_list, color_only_framebuffer, cm, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION, 1.0);
+		}
+		RD::get_singleton()->draw_command_end_label();
+		RD::get_singleton()->draw_list_end();
+	}
+
+	if (debug_sdfgi_probes) {
+		Projection dc;
+		dc.set_depth_correction(true);
+		Projection cms[RendererSceneRender::MAX_RENDER_VIEWS];
+		for (uint32_t v = 0; v < p_render_data->scene_data->view_count; v++) {
+			cms[v] = (dc * p_render_data->scene_data->view_projection[v]) * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+		}
+		_debug_sdfgi_probes(rb, color_only_framebuffer, p_render_data->scene_data->view_count, cms);
+	}
+
+	if (draw_sky || draw_sky_fog_only) {
+		RENDER_TIMESTAMP("Render Sky");
+
+		RD::get_singleton()->draw_command_begin_label("Draw Sky");
+		RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_only_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 1.0f, 0u, p_render_data->render_region);
+
+		sky.draw_sky(draw_list, rb, p_render_data->environment, color_only_framebuffer, time, sky_luminance_multiplier, sky_brightness_multiplier);
+
+		RD::get_singleton()->draw_list_end();
+		RD::get_singleton()->draw_command_end_label();
+	}
+
+	if (use_msaa) {
+		RENDER_TIMESTAMP("Resolve MSAA");
+
+		if (scene_state.used_screen_texture || using_separate_specular || ce_pre_transparent_resolved_color) {
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
+			}
+			if (using_separate_specular) {
+				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+					RD::get_singleton()->texture_resolve_multisample(rb_data->get_specular_msaa(v), rb_data->get_specular(v));
+				}
+			}
+		}
+
+		if (scene_state.used_depth_texture || scene_state.used_normal_texture || using_separate_specular || ce_needs_normal_roughness || ce_pre_transparent_resolved_depth) {
 			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 				resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
 			}
 		}
 	}
 
-	RENDER_TIMESTAMP("Process Pre Transparent Compositor Effects");
-	_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT, p_render_data);
-}
-
-RENDER_TIMESTAMP("Render 3D Transparent Pass");
-
-RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
-
-uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, false);
-
-rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, is_multiview, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
-
-{
-	uint32_t transparent_color_pass_flags = (color_pass_flags | uint32_t(COLOR_PASS_FLAG_TRANSPARENT)) & ~uint32_t(COLOR_PASS_FLAG_SEPARATE_SPECULAR);
-	// Motion vectors should not be overwritten by transparent objects.
-	transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS);
-
-	RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
-	RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-	_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
-}
-
-RD::get_singleton()->draw_command_end_label();
-
-if (rb_data.is_valid() && use_msaa) {
-	RENDER_TIMESTAMP("> Resolve MSAA (Post-Transparent)");
-	RD::get_singleton()->draw_command_begin_label("Resolve MSAA (Post-Transparent)");
-
-	bool compositor_needs_resolved_depth = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_DEPTH, RSE::CompositorEffectCallbackType::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT);
-	bool using_dof = RSG::camera_attributes->camera_attributes_uses_dof(p_render_data->camera_attributes);
-	bool resolve_transparent_depth = (using_taa || using_upscaling || using_dof || compositor_needs_resolved_depth);
-	bool resolve_velocity_buffer = (using_taa || using_upscaling || ce_needs_motion_vectors) && rb->has_velocity_buffer(true);
-
-	RENDER_TIMESTAMP("Resolve Color");
-	for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-		RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
+	{
+		RENDER_TIMESTAMP("Process Post Sky Compositor Effects");
+		// Don't need to check for depth or color resolve here, we've already triggered it.
+		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_SKY, p_render_data);
 	}
-	if (resolve_transparent_depth) {
-		RENDER_TIMESTAMP("Resolve Depth");
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
+
+	if (using_separate_specular) {
+		if (using_sss) {
+			RENDER_TIMESTAMP("Sub-Surface Scattering");
+			RD::get_singleton()->draw_command_begin_label("Process Sub-Surface Scattering");
+			_process_sss(rb, p_render_data->scene_data->cam_projection);
+			RD::get_singleton()->draw_command_end_label();
 		}
-	}
-	if (resolve_velocity_buffer) {
-		RENDER_TIMESTAMP("Resolve Velocity Buffer");
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			RD::get_singleton()->texture_resolve_multisample(rb->get_velocity_buffer(true, v), rb->get_velocity_buffer(false, v));
+
+		{
+			//just mix specular back
+			RENDER_TIMESTAMP("Merge Specular");
+			copy_effects->merge_specular(color_only_framebuffer, rb_data->get_specular(), !use_msaa ? RID() : rb->get_internal_texture(), RID(), p_render_data->scene_data->view_count);
 		}
 	}
 
-	RENDER_TIMESTAMP("< Resolve MSAA (Post-Transparent)");
+	if (using_separate_specular && is_environment(p_render_data->environment) && (environment_get_background(p_render_data->environment) == RSE::ENV_BG_CANVAS)) {
+		// Canvas background mode does not clear the color buffer, but copies over it. If screen-space specular effects are enabled and the background is blank,
+		// this results in ghosting due to the separate specular buffer copy. Need to explicitly clear the specular buffer once we're done with it to fix it.
+		RENDER_TIMESTAMP("Clear Separate Specular (Canvas Background Mode)");
+		Vector<Color> blank_clear_color;
+		blank_clear_color.push_back(Color(0.0, 0.0, 0.0));
+		RD::get_singleton()->draw_list_begin(rb_data->get_specular_only_fb(), RD::DRAW_CLEAR_ALL, blank_clear_color);
+		RD::get_singleton()->draw_list_end();
+	}
+
+	if (rb_data.is_valid() && using_upscaling) {
+		// Make sure the upscaled texture is initialized, but not necessarily filled, before running screen copies
+		// so it properly detect if a dedicated copy texture should be used.
+		rb->ensure_upscaled();
+	}
+
+	if (scene_state.used_screen_texture || global_surface_data.screen_texture_used) {
+		RENDER_TIMESTAMP("Copy Screen Texture");
+
+		_render_buffers_ensure_screen_texture(p_render_data);
+
+		if (scene_state.used_screen_texture) {
+			// Copy screen texture to backbuffer so we can read from it
+			_render_buffers_copy_screen_texture(p_render_data);
+		}
+	}
+
+	if (scene_state.used_depth_texture || global_surface_data.depth_texture_used) {
+		RENDER_TIMESTAMP("Copy Depth Texture");
+
+		_render_buffers_ensure_depth_texture(p_render_data);
+
+		if (scene_state.used_depth_texture) {
+			// Copy depth texture to backbuffer so we can read from it
+			_render_buffers_copy_depth_texture(p_render_data);
+		}
+	}
+
+	{
+		if (using_separate_specular) {
+			// Our specular will be combined back in (and effects, subsurface scattering and/or ssr applied),
+			// so if we've requested this, we need another copy.
+			// Fairly unlikely scenario though.
+
+			if (ce_pre_transparent_resolved_color) {
+				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+					RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
+				}
+			}
+
+			if (ce_pre_transparent_resolved_depth) {
+				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+					resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
+				}
+			}
+		}
+
+		RENDER_TIMESTAMP("Process Pre Transparent Compositor Effects");
+		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT, p_render_data);
+	}
+
+	RENDER_TIMESTAMP("Render 3D Transparent Pass");
+
+	RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
+
+	uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, false);
+
+	rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, is_multiview, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
+
+	{
+		uint32_t transparent_color_pass_flags = (color_pass_flags | uint32_t(COLOR_PASS_FLAG_TRANSPARENT)) & ~uint32_t(COLOR_PASS_FLAG_SEPARATE_SPECULAR);
+		// Motion vectors should not be overwritten by transparent objects.
+		transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS);
+
+		RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
+		RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+		_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+	}
+
 	RD::get_singleton()->draw_command_end_label();
-}
 
-RD::get_singleton()->draw_command_begin_label("Copy Framebuffer for SSIL/SSR");
-if (using_ssil || using_ssr) {
-	RENDER_TIMESTAMP("Copy Final Framebuffer (SSIL/SSR)");
-	_copy_framebuffer_to_ss_effects(rb, using_ssil, using_ssr);
-}
-RD::get_singleton()->draw_command_end_label();
+	if (rb_data.is_valid() && use_msaa) {
+		RENDER_TIMESTAMP("> Resolve MSAA (Post-Transparent)");
+		RD::get_singleton()->draw_command_begin_label("Resolve MSAA (Post-Transparent)");
 
-{
-	RENDER_TIMESTAMP("Process Post Transparent Compositor Effects");
-	_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data);
-}
+		bool compositor_needs_resolved_depth = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_ACCESS_RESOLVED_DEPTH, RSE::CompositorEffectCallbackType::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT);
+		bool using_dof = RSG::camera_attributes->camera_attributes_uses_dof(p_render_data->camera_attributes);
+		bool resolve_transparent_depth = (using_taa || using_upscaling || using_dof || compositor_needs_resolved_depth);
+		bool resolve_velocity_buffer = (using_taa || using_upscaling || ce_needs_motion_vectors) && rb->has_velocity_buffer(true);
 
-if (rb_data.is_valid() && (using_upscaling || using_taa)) {
-	if (scale_type == SCALE_FSR2) {
-		rb_data->ensure_fsr2(fsr2_effect);
-
-		RID exposure;
-		if (RSG::camera_attributes->camera_attributes_uses_auto_exposure(p_render_data->camera_attributes)) {
-			exposure = luminance->get_current_luminance_buffer(rb);
-		}
-
-		RD::get_singleton()->draw_command_begin_label("FSR2");
-		RENDER_TIMESTAMP("FSR2");
-
+		RENDER_TIMESTAMP("Resolve Color");
 		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			real_t fov = p_render_data->scene_data->cam_projection.get_fov();
-			real_t aspect = p_render_data->scene_data->cam_projection.get_aspect();
-			real_t fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
-			Vector2 jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
-			RendererRD::FSR2Effect::Parameters params;
-			params.context = rb_data->get_fsr2_context();
-			params.internal_size = rb->get_internal_size();
-			params.sharpness = CLAMP(1.0f - (rb->get_fsr_sharpness() / 2.0f), 0.0f, 1.0f);
-			params.color = rb->get_internal_texture(v);
-			params.depth = rb->get_depth_texture(v);
-			params.velocity = rb->get_velocity_buffer(false, v);
-			params.reactive = rb->get_internal_texture_reactive(v);
-			params.exposure = exposure;
-			params.output = rb->get_upscaled_texture(v);
-			params.z_near = p_render_data->scene_data->z_near;
-			params.z_far = p_render_data->scene_data->z_far;
-			params.fovy = fovy;
-			params.jitter = jitter;
-			params.delta_time = float(time_step);
-			params.reset_accumulation = false; // FIXME: The engine does not provide a way to reset the accumulation.
-
-			Projection correction;
-			correction.set_depth_correction(true, true, false);
-
-			const Projection &prev_proj = p_render_data->scene_data->prev_cam_projection;
-			const Projection &cur_proj = p_render_data->scene_data->cam_projection;
-			const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
-			const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
-			params.reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
-
-			fsr2_effect->upscale(params);
+			RD::get_singleton()->texture_resolve_multisample(rb->get_color_msaa(v), rb->get_internal_texture(v));
+		}
+		if (resolve_transparent_depth) {
+			RENDER_TIMESTAMP("Resolve Depth");
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				resolve_effects->resolve_depth(rb->get_depth_msaa(v), rb->get_depth_texture(v), rb->get_internal_size(), texture_multisamples[msaa]);
+			}
+		}
+		if (resolve_velocity_buffer) {
+			RENDER_TIMESTAMP("Resolve Velocity Buffer");
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				RD::get_singleton()->texture_resolve_multisample(rb->get_velocity_buffer(true, v), rb->get_velocity_buffer(false, v));
+			}
 		}
 
+		RENDER_TIMESTAMP("< Resolve MSAA (Post-Transparent)");
 		RD::get_singleton()->draw_command_end_label();
-	} else if (scale_type == SCALE_MFX) {
+	}
+
+	RD::get_singleton()->draw_command_begin_label("Copy Framebuffer for SSIL/SSR");
+	if (using_ssil || using_ssr) {
+		RENDER_TIMESTAMP("Copy Final Framebuffer (SSIL/SSR)");
+		_copy_framebuffer_to_ss_effects(rb, using_ssil, using_ssr);
+	}
+	RD::get_singleton()->draw_command_end_label();
+
+	{
+		RENDER_TIMESTAMP("Process Post Transparent Compositor Effects");
+		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT, p_render_data);
+	}
+
+	if (rb_data.is_valid() && (using_upscaling || using_taa)) {
+		if (scale_type == SCALE_FSR2) {
+			rb_data->ensure_fsr2(fsr2_effect);
+
+			RID exposure;
+			if (RSG::camera_attributes->camera_attributes_uses_auto_exposure(p_render_data->camera_attributes)) {
+				exposure = luminance->get_current_luminance_buffer(rb);
+			}
+
+			RD::get_singleton()->draw_command_begin_label("FSR2");
+			RENDER_TIMESTAMP("FSR2");
+
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				real_t fov = p_render_data->scene_data->cam_projection.get_fov();
+				real_t aspect = p_render_data->scene_data->cam_projection.get_aspect();
+				real_t fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
+				Vector2 jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+				RendererRD::FSR2Effect::Parameters params;
+				params.context = rb_data->get_fsr2_context();
+				params.internal_size = rb->get_internal_size();
+				params.sharpness = CLAMP(1.0f - (rb->get_fsr_sharpness() / 2.0f), 0.0f, 1.0f);
+				params.color = rb->get_internal_texture(v);
+				params.depth = rb->get_depth_texture(v);
+				params.velocity = rb->get_velocity_buffer(false, v);
+				params.reactive = rb->get_internal_texture_reactive(v);
+				params.exposure = exposure;
+				params.output = rb->get_upscaled_texture(v);
+				params.z_near = p_render_data->scene_data->z_near;
+				params.z_far = p_render_data->scene_data->z_far;
+				params.fovy = fovy;
+				params.jitter = jitter;
+				params.delta_time = float(time_step);
+				params.reset_accumulation = false; // FIXME: The engine does not provide a way to reset the accumulation.
+
+				Projection correction;
+				correction.set_depth_correction(true, true, false);
+
+				const Projection &prev_proj = p_render_data->scene_data->prev_cam_projection;
+				const Projection &cur_proj = p_render_data->scene_data->cam_projection;
+				const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
+				const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
+				params.reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
+
+				fsr2_effect->upscale(params);
+			}
+
+			RD::get_singleton()->draw_command_end_label();
+		} else if (scale_type == SCALE_MFX) {
 #ifdef METAL_MFXTEMPORAL_ENABLED
-		bool reset = rb_data->ensure_mfx_temporal(mfx_temporal_effect);
+			bool reset = rb_data->ensure_mfx_temporal(mfx_temporal_effect);
 
-		RID exposure;
-		if (RSG::camera_attributes->camera_attributes_uses_auto_exposure(p_render_data->camera_attributes)) {
-			exposure = luminance->get_current_luminance_buffer(rb);
-		}
+			RID exposure;
+			if (RSG::camera_attributes->camera_attributes_uses_auto_exposure(p_render_data->camera_attributes)) {
+				exposure = luminance->get_current_luminance_buffer(rb);
+			}
 
-		RD::get_singleton()->draw_command_begin_label("MetalFX Temporal");
-		// Scale to ±0.5.
-		Vector2 jitter = p_render_data->scene_data->taa_jitter * 0.5f;
-		jitter *= Vector2(1.0, -1.0); // Flip y-axis as bottom left is origin.
+			RD::get_singleton()->draw_command_begin_label("MetalFX Temporal");
+			// Scale to ±0.5.
+			Vector2 jitter = p_render_data->scene_data->taa_jitter * 0.5f;
+			jitter *= Vector2(1.0, -1.0); // Flip y-axis as bottom left is origin.
 
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			RendererRD::MFXTemporalEffect::Params params;
-			params.src = rb->get_internal_texture(v);
-			params.depth = rb->get_depth_texture(v);
-			params.motion = rb->get_velocity_buffer(false, v);
-			params.exposure = exposure;
-			params.dst = rb->get_upscaled_texture(v);
-			params.jitter_offset = jitter;
-			params.reset = reset;
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				RendererRD::MFXTemporalEffect::Params params;
+				params.src = rb->get_internal_texture(v);
+				params.depth = rb->get_depth_texture(v);
+				params.motion = rb->get_velocity_buffer(false, v);
+				params.exposure = exposure;
+				params.dst = rb->get_upscaled_texture(v);
+				params.jitter_offset = jitter;
+				params.reset = reset;
 
-			mfx_temporal_effect->process(rb_data->get_mfx_temporal_context(), params);
-		}
+				mfx_temporal_effect->process(rb_data->get_mfx_temporal_context(), params);
+			}
 
-		RD::get_singleton()->draw_command_end_label();
+			RD::get_singleton()->draw_command_end_label();
 #endif
-	} else if (using_taa) {
-		RD::get_singleton()->draw_command_begin_label("TAA");
-		RENDER_TIMESTAMP("TAA");
-		taa->process(rb, rb->get_base_data_format(), p_render_data->scene_data->z_near, p_render_data->scene_data->z_far);
-		RD::get_singleton()->draw_command_end_label();
-	}
-}
-
-if (rb_data.is_valid()) {
-	_debug_draw_cluster(rb);
-
-	RENDER_TIMESTAMP("Tonemap");
-
-	_render_buffers_post_process_and_tonemap(p_render_data);
-}
-
-if (rb_data.is_valid()) {
-	_render_buffers_debug_draw(p_render_data);
-
-	if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI && rb->has_custom_data(RB_SCOPE_SDFGI)) {
-		Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
-		Vector<RID> view_rids;
-
-		// SDFGI renders at internal resolution, need to check if our debug correctly supports outputting upscaled.
-		Size2i size = rb->get_internal_size();
-		RID source_texture = rb->get_internal_texture();
-		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
-			view_rids.push_back(rb->get_internal_texture(v));
+		} else if (using_taa) {
+			RD::get_singleton()->draw_command_begin_label("TAA");
+			RENDER_TIMESTAMP("TAA");
+			taa->process(rb, rb->get_base_data_format(), p_render_data->scene_data->z_near, p_render_data->scene_data->z_far);
+			RD::get_singleton()->draw_command_end_label();
 		}
-
-		sdfgi->debug_draw(p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform, size.x, size.y, rb->get_render_target(), source_texture, view_rids);
 	}
-}
+
+	if (rb_data.is_valid()) {
+		_debug_draw_cluster(rb);
+
+		RENDER_TIMESTAMP("Tonemap");
+
+		_render_buffers_post_process_and_tonemap(p_render_data);
+	}
+
+	if (rb_data.is_valid()) {
+		_render_buffers_debug_draw(p_render_data);
+
+		if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI && rb->has_custom_data(RB_SCOPE_SDFGI)) {
+			Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
+			Vector<RID> view_rids;
+
+			// SDFGI renders at internal resolution, need to check if our debug correctly supports outputting upscaled.
+			Size2i size = rb->get_internal_size();
+			RID source_texture = rb->get_internal_texture();
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				view_rids.push_back(rb->get_internal_texture(v));
+			}
+
+			sdfgi->debug_draw(p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform, size.x, size.y, rb->get_render_target(), source_texture, view_rids);
+		}
+	}
 }
 
 void RenderForwardClustered::_surface_cache_capture(void *p_self, const Transform3D &p_transform, const Projection &p_projection, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_rect) {
