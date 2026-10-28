@@ -1,6 +1,6 @@
 extends SceneTree
 # Benchmark: N instances of a dense mesh, regular vs virtual geometry.
-# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1 [--wall_off=<frame>]] [--mat=tex] [--compress=1]
+# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1 [--wall_off=<frame>]] [--mat=tex] [--compress=1] [--open=1 --cull=back|front|disabled]
 # --wall_off hides the occluder at the given frame, so the final frame checks that newly revealed geometry appears.
 # Prints average CPU frame time and GPU render time reported by the RenderingServer.
 
@@ -52,10 +52,31 @@ func _init() -> void:
 	var flags := Mesh.ARRAY_FLAG_USE_VIRTUAL_GEOMETRY if use_vg else 0
 	if arg("compress", "0") == "1":
 		flags |= Mesh.ARRAY_FLAG_COMPRESS_ATTRIBUTES
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sm.get_mesh_arrays(), [], {}, flags)
+	var arrays := sm.get_mesh_arrays()
+	if arg("open", "0") == "1":
+		# Cut away the triangles facing the camera, so the inside of the sphere (its back faces) is in view.
+		var pos: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var idx: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+		var kept := PackedInt32Array()
+		for t in idx.size() / 3:
+			var c := pos[idx[t * 3]] + pos[idx[t * 3 + 1]] + pos[idx[t * 3 + 2]]
+			if c.z < 0.9 or c.y < -0.6:
+				kept.append(idx[t * 3])
+				kept.append(idx[t * 3 + 1])
+				kept.append(idx[t * 3 + 2])
+		arrays[Mesh.ARRAY_INDEX] = kept
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, flags)
 	if arg("mat", "") == "tex":
 		# Checker albedo plus a bump normal map, to compare UV, normal and tangent reconstruction.
 		mesh.surface_set_material(0, textured_material())
+	match arg("cull", ""):
+		"back", "front", "disabled":
+			var mat: StandardMaterial3D = mesh.surface_get_material(0)
+			if mat == null:
+				mat = StandardMaterial3D.new()
+				mat.albedo_color = Color(0.7, 0.75, 0.8)
+				mesh.surface_set_material(0, mat)
+			mat.cull_mode = {"back": BaseMaterial3D.CULL_BACK, "front": BaseMaterial3D.CULL_FRONT, "disabled": BaseMaterial3D.CULL_DISABLED}[arg("cull", "")]
 	var root := Node3D.new()
 	var side := int(ceil(sqrt(count)))
 	for i in count:
