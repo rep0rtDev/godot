@@ -49,7 +49,7 @@ class VirtualShadowsEffect {
 public:
 	enum {
 		LEVELS = 16,
-		SPOT_SLOTS = 8,
+		SPOT_SLOTS = 20, // Perspective slots: spot lights take one, omni lights six consecutive ones (cube faces).
 		SPOT_MIPS = 6,
 		TOTAL_LEVELS = LEVELS + SPOT_SLOTS * SPOT_MIPS,
 		PAGES = 128,
@@ -81,6 +81,7 @@ private:
 		uint64_t last_seen = 0;
 		uint32_t version = 1; // Key of the spot pages; bumped when the light moves.
 		Transform3D transform;
+		Transform3D light_transform; // Omni only: the light itself (transform is the face).
 		Projection projection; // Spot only.
 		float normal_bias = 0.0f;
 		// Directional only: world anchored light frame and depth window.
@@ -178,6 +179,7 @@ public:
 	bool is_enabled() const { return enabled; }
 	RID get_pool_texture() const { return pool_texture; }
 	RID get_page_table_buffer() const { return page_table_buffer; }
+	RID get_spot_params_buffer() const { return spot_params_buffer; }
 	RID get_scratch_framebuffer() const { return scratch_fb; }
 
 	void begin_frame(uint64_t p_frame);
@@ -185,7 +187,10 @@ public:
 	void mark(RID p_depth, const RenderSceneDataRD &p_scene_data, const Size2i &p_size);
 	// Decides which windows to render this frame for the light and allocates their pages. p_invalidate holds the bounds
 	// of casters that changed. Returns false when the light is not handled (no free slot, or not the first directional).
-	bool plan_light(RID p_light_instance, bool p_directional, const Transform3D &p_transform, const Projection &p_projection, float p_normal_bias, const LocalVector<AABB> &p_invalidate);
+	// Basis of cube face p_face of an omni light (the window camera looks down -Z): must match vsm_omni_face() in the scene shader.
+	static Basis omni_face_basis(int p_face);
+	bool has_light(RID p_light_instance) const { return _slot_of(p_light_instance) >= 0; }
+	bool plan_light(RID p_light_instance, bool p_directional, bool p_omni, const Transform3D &p_transform, const Projection &p_projection, float p_normal_bias, const LocalVector<AABB> &p_invalidate);
 	void get_windows(RID p_light_instance, LocalVector<const Window *> &r_windows) const;
 	Projection get_window_projection(const Window &p_window) const;
 	Transform3D get_window_transform(const Window &p_window) const;
@@ -195,6 +200,7 @@ public:
 	void copy_pages();
 	// Per-light data read by the scene shader.
 	void fill_directional_light_data(RID p_light_instance, bool p_shadows, float *r_light_view, float *r_depth_row, float *r_params, uint32_t *r_info) const;
+	void fill_omni_light_data(RID p_light_instance, bool p_shadows, const Transform3D &p_camera_inverse_transform, float p_pixel_scale, float *r_light_matrix, float *r_matrix, float *r_params, uint32_t *r_info) const;
 	void fill_spot_light_data(RID p_light_instance, bool p_shadows, const Transform3D &p_camera_inverse_transform, const Transform3D &p_light_transform, float p_pixel_scale, float *r_matrix, float *r_params, uint32_t *r_info) const;
 	const Stats &get_stats() const { return stats; }
 

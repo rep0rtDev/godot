@@ -122,6 +122,17 @@ func _init() -> void:
 		spot.light_size = float(arg("spot_size", "0"))
 		spot.shadow_blur = 1.0
 		root.add_child(spot)
+	if arg("omni", "0") == "1":
+		var omni := OmniLight3D.new()
+		omni.position = Vector3(5, 5, -5)
+		omni.omni_range = 40
+		omni.light_energy = 8
+		omni.shadow_enabled = true
+		omni.light_size = float(arg("omni_size", "0"))
+		omni.shadow_blur = 1.0
+		if arg("omni_cube", "0") == "1":
+			omni.omni_shadow_mode = OmniLight3D.SHADOW_CUBE
+		root.add_child(omni)
 	var side := int(ceil(sqrt(count)))
 	for i in count:
 		var mi := MeshInstance3D.new()

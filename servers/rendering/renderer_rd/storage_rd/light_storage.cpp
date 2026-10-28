@@ -1213,6 +1213,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				Transform3D proj = (inverse_transform * light_transform).inverse();
 
 				RendererRD::MaterialStorage::store_transform(proj, light_data.shadow_matrix);
+				VirtualShadowsEffect::get_singleton()->fill_omni_light_data(light_instance->self, true, inverse_transform, vsm_pixel_scale, light_data.shadow_matrix, light_data.vsm_matrix, light_data.vsm_params, light_data.vsm_info);
 
 				if (size > 0.0 && light_data.soft_shadow_scale > 0.0) {
 					// Only enable PCSS-like soft shadows if blurring is enabled.

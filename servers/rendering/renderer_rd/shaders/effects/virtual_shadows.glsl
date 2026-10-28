@@ -69,6 +69,9 @@ void main() {
 		request(uint(level) * uint(PAGES * PAGES) + uint(page.y) * uint(PAGES) + uint(page.x));
 	}
 	for (int s = 0; s < params.size.z; s++) {
+		if (spots.data[s].info.w == 0.0) {
+			continue;
+		}
 		vec4 clip = spots.data[s].clip_from_world * vec4(world, 1.0);
 		if (clip.w <= 0.0) {
 			continue;

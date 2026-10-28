@@ -463,6 +463,10 @@ half get_omni_attenuation(float distance, float inv_range, float decay) {
 	return half(nd * pow(max(distance, 0.0001), -decay));
 }
 
+#ifdef VIRTUAL_SHADOWS
+float vsm_omni_shadow(uint idx, vec3 vertex, vec3 normal, float dist, float taa_frame_count);
+#endif
+
 void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3 vertex_ddx, vec3 vertex_ddy, hvec3 f0, half roughness, half metallic, float taa_frame_count, hvec3 albedo, inout half alpha, vec2 screen_uv, hvec3 energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 		hvec3 backlight,
@@ -499,7 +503,12 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	half shadow = half(1.0);
 #ifndef SHADOWS_DISABLED
 	// Omni light shadow.
-	if (omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
+#ifdef VIRTUAL_SHADOWS
+	if (omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001 && omni_lights.data[idx].vsm_info.x != 0u) {
+		shadow = mix(half(1.0), half(vsm_omni_shadow(idx, vertex, vec3(normal), light_length, taa_frame_count)), half(omni_lights.data[idx].shadow_opacity));
+	} else
+#endif
+			if (omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
 		// there is a shadowmap
 		vec2 texel_size = scene_data_block.data.shadow_atlas_pixel_size;
 		vec4 base_uv_rect = omni_lights.data[idx].atlas_rect;
@@ -845,6 +854,104 @@ float vsm_spot_shadow(uint idx, vec4 v, float dist, float taa_frame_count) {
 		for (int dx = -1; dx <= 1; dx++) {
 			float sd = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), page_base + clamp(texel - page_base + ivec2(dx, dy), ivec2(0), ivec2(127)), 0).r;
 			lit += ref > sd ? 1.0 : 0.0;
+		}
+	}
+	return lit / 9.0;
+}
+
+// Depth stored for the view-space position p in the pages of omni light idx, from mip on; r_ref is the depth of p
+// itself in the same clip space. The faces are the
+// six slots after the light's first one, addressed in world space with the same matrices the marking pass uses.
+float vsm_omni_fetch(uint idx, vec4 p, int mip, out float r_ref, out ivec2 r_texel) {
+	uvec4 info = omni_lights.data[idx].vsm_info;
+	int mips = int(omni_lights.data[idx].vsm_params.y);
+	r_texel = ivec2(0);
+	r_ref = 0.0;
+	// The omni shadow bias is in world units (as in the atlas path): move the point toward the light before projecting.
+	vec3 biased = p.xyz + normalize(omni_lights.data[idx].position - p.xyz) * omni_lights.data[idx].shadow_bias;
+	vec4 world = scene_data_block.data.main_cam_inv_view_matrix * vec4(biased, 1.0);
+	uint first_slot = (info.y / 16384u - 16u) / uint(mips);
+	int face = -1;
+	vec4 clip;
+	for (int f = 0; f < 6 && face < 0; f++) {
+		clip = vsm_slots.data[first_slot + uint(f)].clip_from_world * world;
+		if (clip.w > 0.0 && all(lessThanEqual(abs(clip.xy), vec2(clip.w)))) {
+			face = f;
+		}
+	}
+	if (face < 0) {
+		return -1.0;
+	}
+	vec3 ndc = clip.xyz / clip.w;
+	r_ref = ndc.z;
+	uint base = info.y + uint(face * mips) * 16384u;
+	vec2 uv = ndc.xy * 0.5 + 0.5;
+	for (; mip < mips; mip++) {
+		float pages = float(128 >> mip);
+		vec2 pp = uv * pages;
+		ivec2 page = clamp(ivec2(floor(pp)), ivec2(0), ivec2(int(pages) - 1));
+		uvec2 e = vsm_page_table.data[base + uint(mip) * 16384u + uint(page.y) * 128u + uint(page.x)];
+		if ((e.x & 1u) == 0u || e.y != info.w) {
+			continue;
+		}
+		uint phys = e.x >> 1u;
+		r_texel = ivec2((phys % info.z) * 128u, (phys / info.z) * 128u) + clamp(ivec2(fract(pp) * 128.0), ivec2(0), ivec2(127));
+		return texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), r_texel, 0).r;
+	}
+	return -1.0;
+}
+
+// Virtual shadow map lookup for omni light idx (vertex and normal in view space). Normal bias scales with the texel
+// of the chosen mip. SMRT toward the light disk when the light has a size, PCF 3x3 otherwise. Lit when no page is
+// resident.
+float vsm_omni_shadow(uint idx, vec3 vertex, vec3 normal, float dist, float taa_frame_count) {
+	vec4 params = omni_lights.data[idx].vsm_params;
+	float footprint = -vertex.z * 2.0 / params.w;
+	int mips = int(params.y);
+	int mip = clamp(int(ceil(log2(footprint * 16384.0 / (2.0 * dist * params.x)))), 0, mips - 1);
+	float texel = 2.0 * dist * params.x / float(16384 >> mip);
+	vec4 v = vec4(vertex + normal * texel * omni_lights.data[idx].shadow_normal_bias, 1.0);
+	float ref;
+	ivec2 texel_pos;
+	float d = vsm_omni_fetch(idx, v, mip, ref, texel_pos);
+	if (d < 0.0) {
+		return 1.0;
+	}
+	int rays = int(omni_lights.data[idx].vsm_info.x >> 8u);
+	float radius = omni_lights.data[idx].soft_shadow_size;
+	vec3 to_light = omni_lights.data[idx].position - v.xyz;
+	if (rays > 0 && radius > 0.0) {
+		vec3 dir = to_light / dist;
+		vec3 tx = normalize(abs(dir.y) < 0.9 ? cross(dir, vec3(0.0, 1.0, 0.0)) : cross(dir, vec3(1.0, 0.0, 0.0)));
+		vec3 ty = cross(dir, tx);
+		float r = quick_hash(vec2(gl_FragCoord.xy) + vec2(float(taa_frame_count) * 5.588238)) * 2.0 * M_PI;
+		const int steps = 8;
+		float blocked = 0.0;
+		for (int ray = 0; ray < rays; ray++) {
+			float a = r + float(ray) * 2.0 * M_PI / float(rays);
+			float rad = sqrt((float(ray) + 0.5) / float(rays)) * radius;
+			vec3 disk = (tx * cos(a) + ty * sin(a)) * rad;
+			for (int s = 1; s <= steps; s++) {
+				float t = (float(s) - 0.5 + 0.5 * quick_hash(vec2(gl_FragCoord.yx) + vec2(float(ray), float(s)))) / float(steps);
+				vec4 p = vec4(v.xyz + to_light * t + disk * t, 1.0);
+				float sref;
+				ivec2 st;
+				float sd = vsm_omni_fetch(idx, p, mip, sref, st);
+				if (sd > sref) {
+					blocked += 1.0;
+					break;
+				}
+			}
+		}
+		return 1.0 - blocked / float(rays);
+	}
+	// PCF 3x3 inside the page.
+	float lit = 0.0;
+	ivec2 page_origin = (texel_pos / 128) * 128;
+	for (int y = -1; y <= 1; y++) {
+		for (int x = -1; x <= 1; x++) {
+			ivec2 t = clamp(texel_pos + ivec2(x, y), page_origin, page_origin + 127);
+			lit += ref > texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), t, 0).r ? 1.0 : 0.0;
 		}
 	}
 	return lit / 9.0;

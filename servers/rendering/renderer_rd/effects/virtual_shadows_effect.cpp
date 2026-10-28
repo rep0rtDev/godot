@@ -185,6 +185,7 @@ void VirtualShadowsEffect::mark(RID p_depth, const RenderSceneDataRD &p_scene_da
 	params.size[3] = slots[0].valid ? 1 : 0;
 
 	SpotParams spots[SPOT_SLOTS];
+	memset(spots, 0, sizeof(spots));
 	uint32_t spot_count = 0;
 	Projection spot_correction;
 	spot_correction.set_depth_correction(false);
@@ -193,7 +194,8 @@ void VirtualShadowsEffect::mark(RID p_depth, const RenderSceneDataRD &p_scene_da
 		if (!slot.valid) {
 			continue;
 		}
-		SpotParams &sp = spots[spot_count++];
+		spot_count++;
+		SpotParams &sp = spots[s - 1]; // Indexed by slot so the scene shader can address the faces of an omni light.
 		MaterialStorage::store_camera(spot_correction * slot.projection * Projection(slot.transform.affine_inverse()), sp.clip_from_world);
 		sp.position_range[0] = slot.transform.origin.x;
 		sp.position_range[1] = slot.transform.origin.y;
@@ -202,12 +204,10 @@ void VirtualShadowsEffect::mark(RID p_depth, const RenderSceneDataRD &p_scene_da
 		sp.info[0] = _slot_level(s, 0);
 		sp.info[1] = SPOT_MIPS;
 		sp.info[2] = slot.projection.get_viewport_half_extents().x / slot.projection.get_z_near();
-		sp.info[3] = 0;
+		sp.info[3] = 1;
 	}
-	params.size[2] = spot_count;
-	if (spot_count) {
-		RD::get_singleton()->buffer_update(spot_params_buffer, 0, sizeof(SpotParams) * spot_count, spots);
-	}
+	params.size[2] = SPOT_SLOTS;
+	RD::get_singleton()->buffer_update(spot_params_buffer, 0, sizeof(SpotParams) * SPOT_SLOTS, spots);
 	if (!params.size[3] && !spot_count) {
 		return;
 	}
@@ -506,10 +506,19 @@ void VirtualShadowsEffect::_plan_windows(uint32_t p_slot) {
 	}
 }
 
-bool VirtualShadowsEffect::plan_light(RID p_light_instance, bool p_directional, const Transform3D &p_transform, const Projection &p_projection, float p_normal_bias, const LocalVector<AABB> &p_invalidate) {
+Basis VirtualShadowsEffect::omni_face_basis(int p_face) {
+	Vector3 f;
+	f[p_face / 2] = (p_face & 1) ? -1.0f : 1.0f;
+	const Vector3 b = -f;
+	const Vector3 u = Math::abs(f.y) > 0.5f ? Vector3(0, 0, 1) : Vector3(0, 1, 0);
+	return Basis(u.cross(b), u, b);
+}
+
+bool VirtualShadowsEffect::plan_light(RID p_light_instance, bool p_directional, bool p_omni, const Transform3D &p_transform, const Projection &p_projection, float p_normal_bias, const LocalVector<AABB> &p_invalidate) {
 	if (!enabled) {
 		return false;
 	}
+	const uint32_t count = p_omni ? 6 : 1;
 	int32_t s = _slot_of(p_light_instance);
 	if (s < 0) {
 		if (p_directional) {
@@ -518,8 +527,12 @@ bool VirtualShadowsEffect::plan_light(RID p_light_instance, bool p_directional, 
 			}
 			s = 0;
 		} else {
-			for (uint32_t i = 1; i <= SPOT_SLOTS && s < 0; i++) {
-				if (!slots[i].valid) {
+			for (uint32_t i = 1; i + count - 1 <= SPOT_SLOTS && s < 0; i++) {
+				bool free = true;
+				for (uint32_t c = 0; c < count && free; c++) {
+					free = !slots[i + c].valid;
+				}
+				if (free) {
 					s = i;
 				}
 			}
@@ -527,27 +540,39 @@ bool VirtualShadowsEffect::plan_light(RID p_light_instance, bool p_directional, 
 				return false;
 			}
 		}
-		_free_slot(s);
+		for (uint32_t c = 0; c < count; c++) {
+			_free_slot(s + c);
+		}
 	}
-	Slot &slot = slots[s];
-	if (p_directional) {
-		_plan_directional(slot, 0, p_transform, p_projection.get_z_far());
-	} else {
-		_plan_spot(slot, p_transform, p_projection);
+	uint32_t version = 0;
+	for (uint32_t c = 0; c < count; c++) {
+		Slot &slot = slots[s + c];
+		if (p_directional) {
+			_plan_directional(slot, 0, p_transform, p_projection.get_z_far());
+		} else if (p_omni) {
+			_plan_spot(slot, Transform3D(p_transform.basis * omni_face_basis(c), p_transform.origin), p_projection);
+			slot.light_transform = p_transform;
+		} else {
+			_plan_spot(slot, p_transform, p_projection);
+		}
+		slot.valid = true;
+		slot.light = p_light_instance;
+		slot.last_seen = frame;
+		slot.normal_bias = p_normal_bias;
+		version = MAX(version, slot.version);
 	}
-	slot.valid = true;
-	slot.light = p_light_instance;
-	slot.last_seen = frame;
-	slot.normal_bias = p_normal_bias;
-	_invalidate(s, p_invalidate);
-	_plan_windows(s);
+	for (uint32_t c = 0; c < count; c++) {
+		// The faces of an omni light share one page key, so a reset of any face has to bump all of them.
+		slots[s + c].version = version;
+		_invalidate(s + c, p_invalidate);
+		_plan_windows(s + c);
+	}
 	return true;
 }
 
 void VirtualShadowsEffect::get_windows(RID p_light_instance, LocalVector<const Window *> &r_windows) const {
-	const int32_t s = _slot_of(p_light_instance);
 	for (const Window &w : windows) {
-		if (int32_t(w.slot) == s) {
+		if (slots[w.slot].light == p_light_instance) {
 			r_windows.push_back(&w);
 		}
 	}
@@ -686,6 +711,29 @@ void VirtualShadowsEffect::fill_directional_light_data(RID p_light_instance, boo
 	r_info[1] = 0;
 	r_info[2] = pool_cols;
 	r_info[3] = debug_mode;
+}
+
+void VirtualShadowsEffect::fill_omni_light_data(RID p_light_instance, bool p_shadows, const Transform3D &p_camera_inverse_transform, float p_pixel_scale, float *r_light_matrix, float *r_matrix, float *r_params, uint32_t *r_info) const {
+	r_info[0] = r_info[1] = r_info[2] = r_info[3] = 0;
+	const int32_t s = enabled && p_shadows ? _slot_of(p_light_instance) : -1;
+	if (s <= 0) {
+		return;
+	}
+	const Slot &slot = slots[s];
+	Projection correction;
+	correction.set_depth_correction(false);
+	// View space to light space (the atlas is not used for this light, so its shadow_matrix carries it) and face space
+	// to the face's clip space; the shader picks the face from the light-local position.
+	MaterialStorage::store_transform((p_camera_inverse_transform * slot.light_transform).affine_inverse(), r_light_matrix);
+	MaterialStorage::store_camera(correction * slot.projection, r_matrix);
+	r_params[0] = slot.projection.get_viewport_half_extents().x / slot.projection.get_z_near();
+	r_params[1] = SPOT_MIPS;
+	r_params[2] = slot.normal_bias;
+	r_params[3] = p_pixel_scale;
+	r_info[0] = 2u | (smrt_rays << 8);
+	r_info[1] = _slot_level(s, 0) * ENTRIES_PER_LEVEL;
+	r_info[2] = pool_cols;
+	r_info[3] = slot.version;
 }
 
 void VirtualShadowsEffect::fill_spot_light_data(RID p_light_instance, bool p_shadows, const Transform3D &p_camera_inverse_transform, const Transform3D &p_light_transform, float p_pixel_scale, float *r_matrix, float *r_params, uint32_t *r_info) const {

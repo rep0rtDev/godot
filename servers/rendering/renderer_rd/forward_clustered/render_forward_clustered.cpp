@@ -3003,6 +3003,56 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 	}
 }
 
+bool RenderForwardClustered::_render_virtual_shadow(RID p_light, RSE::LightType p_type, const Transform3D &p_transform, const Projection &p_projection, float p_zfar, bool p_reverse_cull_face, bool p_use_pancake, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	RID base = light_storage->light_instance_get_base_light(p_light);
+	bool handled = false;
+	// Virtual shadow pages: windows rendered into the scratch target, copied after _render_shadow_end().
+	// Casters that moved, entered or left the shadow set invalidate the pages under their old and new bounds.
+	const uint64_t frame = RSG::rasterizer->get_frame_number();
+	LocalVector<AABB> invalidate;
+	HashMap<const void *, AABB> casters;
+	HashMap<const void *, AABB> &prev_casters = vsm_casters[p_light];
+	for (int i = 0; i < int(p_instances.size()); i++) {
+		const GeometryInstanceForwardClustered *gi = static_cast<const GeometryInstanceForwardClustered *>(p_instances[i]);
+		casters.insert(gi, gi->transformed_aabb);
+		const AABB *prev = prev_casters.getptr(gi);
+		const bool moved = gi->prev_transform_change_frame != 0xFFFFFFFF && gi->prev_transform_change_frame + 1 >= frame;
+		if (!prev || moved) {
+			invalidate.push_back(gi->transformed_aabb);
+		}
+		if (prev && moved && !prev->is_equal_approx(gi->transformed_aabb)) {
+			invalidate.push_back(*prev);
+		}
+	}
+	for (const KeyValue<const void *, AABB> &kv : prev_casters) {
+		if (!casters.has(kv.key)) {
+			invalidate.push_back(kv.value);
+		}
+	}
+	prev_casters = casters;
+	if (virtual_shadows->plan_light(p_light, p_type == RSE::LIGHT_DIRECTIONAL, p_type == RSE::LIGHT_OMNI, p_transform, p_projection, light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS), invalidate)) {
+		handled = true;
+		if (!vsm_instance_pool_ready) {
+			vsm_instance_pool_ready = true;
+			vsm_instance_pool.configure(1024);
+			vsm_window_instances.set_page_pool(&vsm_instance_pool);
+		}
+		LocalVector<const RendererRD::VirtualShadowsEffect::Window *> light_windows;
+		virtual_shadows->get_windows(p_light, light_windows);
+		for (const RendererRD::VirtualShadowsEffect::Window *win : light_windows) {
+			vsm_window_instances.clear();
+			for (int i = 0; i < int(p_instances.size()); i++) {
+				if (virtual_shadows->window_touches(*win, static_cast<const GeometryInstanceForwardClustered *>(p_instances[i])->transformed_aabb)) {
+					vsm_window_instances.push_back(p_instances[i]);
+				}
+			}
+			_render_shadow_append(virtual_shadows->get_scratch_framebuffer(), vsm_window_instances, virtual_shadows->get_window_projection(*win), virtual_shadows->get_window_transform(*win), p_zfar, 0, 0, p_reverse_cull_face, false, false, p_use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, win->rect, true, true, false, false, p_render_info, p_viewport_size, p_main_cam_transform);
+		}
+	}
+	return handled;
+}
+
 void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
@@ -3109,6 +3159,54 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 		zfar = light_storage->light_get_param(base, RSE::LIGHT_PARAM_RANGE);
 
+		if (light_storage->light_get_type(base) == RSE::LIGHT_OMNI && virtual_shadows->is_enabled()) {
+			// Virtual pages for omni lights: the culled casters arrive per pass (paraboloid halves or cube faces), so they
+			// are gathered over the passes and the six perspective faces are planned and rendered on the last one.
+			const bool cube = light_storage->light_omni_get_shadow_mode(base) == RSE::LIGHT_OMNI_SHADOW_CUBE;
+			const int last_pass = cube ? 5 : 1;
+			const bool had_pages = virtual_shadows->has_light(p_light);
+			LocalVector<RenderGeometryInstance *> &gathered = vsm_omni_casters[p_light];
+			if (p_pass == 0) {
+				gathered.clear();
+			}
+			for (int i = 0; i < int(p_instances.size()); i++) {
+				gathered.push_back(p_instances[i]);
+			}
+			if (p_pass < last_pass) {
+				if (had_pages) {
+					return; // Nothing to draw into the atlas; the pages are rendered on the last pass.
+				}
+			} else {
+				if (!vsm_instance_pool_ready) {
+					vsm_instance_pool_ready = true;
+					vsm_instance_pool.configure(1024);
+					vsm_window_instances.set_page_pool(&vsm_instance_pool);
+					vsm_omni_instances.set_page_pool(&vsm_instance_pool);
+				}
+				HashSet<RenderGeometryInstance *> seen;
+				vsm_omni_instances.clear();
+				for (RenderGeometryInstance *gi : gathered) {
+					if (!seen.has(gi)) {
+						seen.insert(gi);
+						vsm_omni_instances.push_back(gi);
+					}
+				}
+				const Projection face_projection = Projection::create_perspective(90.0, 1.0, light_storage->light_instance_get_shadow_camera(p_light, 0).get_z_near(), zfar);
+				if (cube && had_pages) {
+					_render_shadow_begin(); // Cube lights render outside the shared shadow pass; without pages pass 0 already opened it.
+				}
+				const bool handled = _render_virtual_shadow(p_light, RSE::LIGHT_OMNI, light_storage->light_instance_get_base_transform(p_light), face_projection, zfar, reverse_cull_face, use_pancake, vsm_omni_instances, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, p_render_info, p_viewport_size, p_main_cam_transform);
+				vsm_omni_instances.clear();
+				if (cube && (handled || had_pages)) {
+					_render_shadow_process();
+					_render_shadow_end();
+					return;
+				}
+				if (handled) {
+					return;
+				}
+			}
+		}
 		if (light_storage->light_get_type(base) == RSE::LIGHT_OMNI) {
 			bool wrap = (shadow + 1) % subdivision == 0;
 			dual_paraboloid_offset = wrap ? Vector2i(1 - subdivision, 1) : Vector2i(1, 0);
@@ -3193,49 +3291,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 		bool virtual_shadow = false;
 		const RSE::LightType vsm_type = light_storage->light_get_type(base);
 		if (virtual_shadows->is_enabled() && (vsm_type == RSE::LIGHT_DIRECTIONAL || vsm_type == RSE::LIGHT_SPOT) && p_pass == 0) {
-			// Virtual shadow pages: windows rendered into the scratch target, copied after _render_shadow_end().
-			// Casters that moved, entered or left the shadow set invalidate the pages under their old and new bounds.
-			const uint64_t frame = RSG::rasterizer->get_frame_number();
-			LocalVector<AABB> invalidate;
-			HashMap<const void *, AABB> casters;
-			HashMap<const void *, AABB> &prev_casters = vsm_casters[p_light];
-			for (int i = 0; i < int(p_instances.size()); i++) {
-				const GeometryInstanceForwardClustered *gi = static_cast<const GeometryInstanceForwardClustered *>(p_instances[i]);
-				casters.insert(gi, gi->transformed_aabb);
-				const AABB *prev = prev_casters.getptr(gi);
-				const bool moved = gi->prev_transform_change_frame != 0xFFFFFFFF && gi->prev_transform_change_frame + 1 >= frame;
-				if (!prev || moved) {
-					invalidate.push_back(gi->transformed_aabb);
-				}
-				if (prev && moved && !prev->is_equal_approx(gi->transformed_aabb)) {
-					invalidate.push_back(*prev);
-				}
-			}
-			for (const KeyValue<const void *, AABB> &kv : prev_casters) {
-				if (!casters.has(kv.key)) {
-					invalidate.push_back(kv.value);
-				}
-			}
-			prev_casters = casters;
-			if (virtual_shadows->plan_light(p_light, vsm_type == RSE::LIGHT_DIRECTIONAL, light_transform, light_projection, light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS), invalidate)) {
-				virtual_shadow = true;
-				if (!vsm_instance_pool_ready) {
-					vsm_instance_pool_ready = true;
-					vsm_instance_pool.configure(1024);
-					vsm_window_instances.set_page_pool(&vsm_instance_pool);
-				}
-				LocalVector<const RendererRD::VirtualShadowsEffect::Window *> light_windows;
-				virtual_shadows->get_windows(p_light, light_windows);
-				for (const RendererRD::VirtualShadowsEffect::Window *win : light_windows) {
-					vsm_window_instances.clear();
-					for (int i = 0; i < int(p_instances.size()); i++) {
-						if (virtual_shadows->window_touches(*win, static_cast<const GeometryInstanceForwardClustered *>(p_instances[i])->transformed_aabb)) {
-							vsm_window_instances.push_back(p_instances[i]);
-						}
-					}
-					_render_shadow_append(virtual_shadows->get_scratch_framebuffer(), vsm_window_instances, virtual_shadows->get_window_projection(*win), virtual_shadows->get_window_transform(*win), zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, win->rect, true, true, false, false, p_render_info, p_viewport_size, p_main_cam_transform);
-				}
-			}
+			virtual_shadow = _render_virtual_shadow(p_light, vsm_type, light_transform, light_projection, zfar, reverse_cull_face, use_pancake, p_instances, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, p_render_info, p_viewport_size, p_main_cam_transform);
 		}
 		if (!virtual_shadow) {
 			_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
@@ -4253,6 +4309,13 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.append_id(virtual_shadows->get_page_table_buffer());
 		uniforms.push_back(u);
 	}
+	{
+		RD::Uniform u;
+		u.binding = 41;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(virtual_shadows->get_spot_params_buffer());
+		uniforms.push_back(u);
+	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);
 }
@@ -4480,6 +4543,13 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 		u.binding = 40;
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 		u.append_id(virtual_shadows->get_page_table_buffer());
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 41;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(virtual_shadows->get_spot_params_buffer());
 		uniforms.push_back(u);
 	}
 
