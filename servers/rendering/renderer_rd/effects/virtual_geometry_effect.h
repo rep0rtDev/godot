@@ -75,8 +75,11 @@ public:
 	static constexpr uint32_t WINDOW_RANGE_FIRST = 5;
 	static constexpr uint32_t WINDOW_RANGES = 16;
 	static constexpr uint32_t COMMAND_RANGES = WINDOW_RANGE_FIRST + WINDOW_RANGES;
-	static constexpr uint32_t HEADER_SIZE = 96;
-	static_assert(HEADER_SIZE >= sizeof(uint32_t) * COMMAND_RANGES);
+	// Header: counts of the five fixed ranges (8 words), then one dispatch argument block (count, 1, 1, 0) per window range.
+	static constexpr uint32_t COUNTS_SIZE = sizeof(uint32_t) * 8;
+	static constexpr uint32_t WINDOW_ARGS_OFFSET = COUNTS_SIZE;
+	static constexpr uint32_t HEADER_SIZE = WINDOW_ARGS_OFFSET + WINDOW_RANGES * sizeof(uint32_t) * 4;
+	static_assert(WINDOW_RANGE_FIRST <= 8);
 
 	struct PushConstant {
 		float modelview[12];

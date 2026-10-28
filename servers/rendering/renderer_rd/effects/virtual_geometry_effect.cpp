@@ -232,6 +232,10 @@ RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluste
 	data.resize(HEADER_SIZE + cluster_count * COMMAND_RANGES * COMMAND_STRIDE);
 	memset(data.ptrw(), 0, data.size());
 	uint32_t *header = reinterpret_cast<uint32_t *>(data.ptrw());
+	for (uint32_t k = 0; k < WINDOW_RANGES; k++) {
+		header[WINDOW_ARGS_OFFSET / sizeof(uint32_t) + k * 4 + 1] = 1; // Dispatch arguments: y and z stay 1.
+		header[WINDOW_ARGS_OFFSET / sizeof(uint32_t) + k * 4 + 2] = 1;
+	}
 	uint32_t *w = reinterpret_cast<uint32_t *>(data.ptrw() + HEADER_SIZE);
 	uint32_t leaf_clusters = 0;
 	for (uint32_t i = 0; i < cluster_count; i++) {

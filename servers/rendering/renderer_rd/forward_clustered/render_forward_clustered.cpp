@@ -638,7 +638,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				if (virtual_geometry->uses_indirect_count()) {
 					// Camera ranges: early clusters (visible last frame) and late clusters (found by the occlusion pass).
 					if (!camera_range || p_params->vg_phase != 2) {
-						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t) * shadow_range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : (p_params->vg_window_range >= 0 ? RendererRD::VirtualGeometryEffect::WINDOW_ARGS_OFFSET + p_params->vg_window_range * sizeof(uint32_t) * 4 : sizeof(uint32_t)), surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 					}
 					if (camera_range && p_params->vg_phase != 1) {
 						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + 2 * range_size, surf->vg_command_buffer, sizeof(uint32_t) * 2, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
@@ -4863,7 +4863,7 @@ void RenderForwardClustered::_virtual_geometry_select_window(const SceneState::S
 	const bool compact = virtual_geometry->uses_indirect_count();
 	if (compact) {
 		for (GeometryInstanceSurfaceDataCache *surf : surfaces) {
-			RD::get_singleton()->buffer_clear(surf->vg_command_buffer, sizeof(uint32_t) * range, sizeof(uint32_t));
+			RD::get_singleton()->buffer_clear(surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::WINDOW_ARGS_OFFSET + p_pass.vg_window_range * sizeof(uint32_t) * 4, sizeof(uint32_t));
 		}
 	}
 	RendererRD::VirtualGeometryEffect::PushConstant push_constant;
@@ -4931,7 +4931,8 @@ bool RenderForwardClustered::_virtual_geometry_raster_window(const SceneState::S
 	RendererRD::VirtualGeometryEffect::RasterPushConstant push_constant = {};
 	push_constant.size[0] = RendererRD::VirtualShadowsEffect::WINDOW_TEXELS;
 	push_constant.size[1] = RendererRD::VirtualShadowsEffect::WINDOW_TEXELS;
-	push_constant.entry_capacity = range; // Index of the range's count in the command buffer header.
+	const uint32_t args_offset = RendererRD::VirtualGeometryEffect::WINDOW_ARGS_OFFSET + p_pass.vg_window_range * sizeof(uint32_t) * 4;
+	push_constant.entry_capacity = args_offset / sizeof(uint32_t); // Word index of the window's cluster count in the command buffer header.
 	push_constant.flags = virtual_geometry->uses_indirect_count() ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_COMPACT : 0;
 	push_constant.pad[0] = slot * RendererRD::VirtualShadowsEffect::WINDOW_TEXELS * RendererRD::VirtualShadowsEffect::WINDOW_TEXELS;
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
@@ -4947,7 +4948,11 @@ bool RenderForwardClustered::_virtual_geometry_raster_window(const SceneState::S
 		push_constant.list_offset = (RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE) / sizeof(uint32_t);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_shadow_raster_uniform_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
-		RD::get_singleton()->compute_list_dispatch(compute_list, surf->vg_cluster_count, 1, 1);
+		if (push_constant.flags & RendererRD::VirtualGeometryEffect::RASTER_FLAG_COMPACT) {
+			RD::get_singleton()->compute_list_dispatch_indirect(compute_list, surf->vg_command_buffer, args_offset);
+		} else {
+			RD::get_singleton()->compute_list_dispatch(compute_list, surf->vg_cluster_count, 1, 1);
+		}
 	}
 	RD::get_singleton()->compute_list_end();
 	return true;
@@ -5047,7 +5052,7 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 
 	if (compact) {
 		for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
-			RD::get_singleton()->buffer_clear(surf->vg_command_buffer, 0, RendererRD::VirtualGeometryEffect::HEADER_SIZE);
+			RD::get_singleton()->buffer_clear(surf->vg_command_buffer, 0, RendererRD::VirtualGeometryEffect::COUNTS_SIZE);
 		}
 	}
 

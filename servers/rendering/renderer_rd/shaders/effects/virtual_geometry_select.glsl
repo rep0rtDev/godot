@@ -43,7 +43,8 @@ struct DrawCommand {
 // With FLAG_COMPACT the selected clusters are packed at the start of each range and counts[] holds the draw count
 // (cleared to zero before dispatch). Otherwise every cluster keeps its own slot and rejected ones get zero instances.
 layout(set = 0, binding = 1, std430) restrict buffer Commands {
-	uint counts[24];
+	uint counts[8];
+	uvec4 window_args[16]; // Per window range: visible cluster count as dispatch x, then 1, 1, 0.
 	DrawCommand data[];
 }
 commands;
@@ -384,7 +385,7 @@ void main() {
 		}
 		if ((params.flags & FLAG_COMPACT) != 0u) {
 			if (visible) {
-				commands.data[range * params.cluster_count + atomicAdd(commands.counts[range], 1u)] = wcmd;
+				commands.data[range * params.cluster_count + atomicAdd(commands.window_args[params.flags >> 16u].x, 1u)] = wcmd;
 			}
 		} else {
 			wcmd.instance_count = visible ? 1u : 0u;
