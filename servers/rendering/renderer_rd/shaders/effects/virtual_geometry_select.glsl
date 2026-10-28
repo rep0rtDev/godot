@@ -43,7 +43,7 @@ struct DrawCommand {
 // With FLAG_COMPACT the selected clusters are packed at the start of each range and counts[] holds the draw count
 // (cleared to zero before dispatch). Otherwise every cluster keeps its own slot and rejected ones get zero instances.
 layout(set = 0, binding = 1, std430) restrict buffer Commands {
-	uint counts[8];
+	uint counts[24];
 	DrawCommand data[];
 }
 commands;
@@ -55,6 +55,7 @@ commands;
 #define FLAG_FLIP_Y 16u
 #define FLAG_HIERARCHY 32u
 #define FLAG_SOFTWARE 64u
+#define FLAG_WINDOW 128u
 
 struct Node {
 	vec4 cull_sphere;
@@ -122,7 +123,7 @@ layout(set = 1, binding = 0) uniform sampler2D hzb;
 
 // Camera clusters, camera triangles, shadow clusters, shadow triangles, software clusters, software triangles.
 layout(set = 0, binding = 2, std430) restrict buffer Stats {
-	uint data[6];
+	uint data[8];
 }
 stats;
 
@@ -368,6 +369,29 @@ void main() {
 		atomicOr(requests.data[page], 1u);
 	}
 	bool visible = selected && in_frustum(to_view(c.cull_sphere.xyz), c.cull_sphere.w * scale);
+	if ((params.flags & FLAG_WINDOW) != 0u) {
+		// Virtual shadow window: only the clusters inside this window go to its own range; nothing else is touched.
+		uint range = 5u + (params.flags >> 16u);
+		DrawCommand wcmd;
+		wcmd.vertex_count = (c.page_and_triangles & 0xFFu) * 3u;
+		wcmd.instance_count = 1u;
+		wcmd.first_vertex = index * 384u;
+		wcmd.first_instance = 0u;
+		wcmd.pad = 0u;
+		if (visible && (params.flags & FLAG_STATS) != 0u) {
+			atomicAdd(stats.data[6], 1u);
+			atomicAdd(stats.data[7], (c.page_and_triangles & 0xFFu));
+		}
+		if ((params.flags & FLAG_COMPACT) != 0u) {
+			if (visible) {
+				commands.data[range * params.cluster_count + atomicAdd(commands.counts[range], 1u)] = wcmd;
+			}
+		} else {
+			wcmd.instance_count = visible ? 1u : 0u;
+			commands.data[range * params.cluster_count + index] = wcmd;
+		}
+		return;
+	}
 
 #ifdef MODE_OCCLUSION
 	bool now_visible = visible && !is_occluded(to_view(c.cull_sphere.xyz), c.cull_sphere.w * scale);

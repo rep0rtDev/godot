@@ -11,6 +11,9 @@ var cam: Camera3D
 var wall: MeshInstance3D
 var wall_off := -1
 var move_frame := -1
+var anim := false
+var anim_base := Vector3()
+var shadow_tris_max := 0
 var cam_move := 0.0
 var skin_skel: Skeleton3D
 var cam_x := 0.0
@@ -262,6 +265,7 @@ func _init() -> void:
 		get_root().scaling_3d_scale = float(arg("scale", "0.5"))
 	wall_off = int(arg("wall_off", "-1"))
 	move_frame = int(arg("move", "-1"))
+	anim = arg("anim", "0") == "1"
 	cam_move = float(arg("cam_move", "0"))
 	cam_x = float(arg("cam_x", "0"))
 	if arg("backdrop", "0") == "1":
@@ -327,6 +331,13 @@ func _process(_delta: float) -> bool:
 	if cam_move != 0.0 and cam and frame > 0:
 		cam.position.x += cam_move
 	frame += 1
+	if first_mi and anim:
+		# Keeps one caster moving so that its shadow pages are redrawn every frame.
+		if frame == 1:
+			anim_base = first_mi.position
+		first_mi.position = anim_base + Vector3(sin(float(frame) * 0.2) * 0.5, 0, 0)
+	if frame > warmup:
+		shadow_tris_max = maxi(shadow_tris_max, RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME))
 	if first_mi and frame == move_frame:
 		# Moves one caster so that its cached shadow has to be redrawn.
 		first_mi.position += Vector3(6, 0, 0)
@@ -355,6 +366,7 @@ func _process(_delta: float) -> bool:
 		print("RESULT vg_sw_clusters=%d vg_sw_tris=%d" % [
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME),
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME)])
+		print("RESULT vg_shadow_tris_max=%d" % shadow_tris_max)
 		print("RESULT vg_clusters=%d vg_tris=%d vg_shadow_tris=%d total_prims=%d draw_calls=%d" % [
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME),
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME),

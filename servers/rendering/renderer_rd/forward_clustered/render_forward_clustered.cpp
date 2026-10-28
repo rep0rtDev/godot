@@ -631,11 +631,12 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				// Camera-facing passes use the frustum-culled range; shadow and auxiliary passes the LOD-only range.
 				const bool camera_range = p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI;
 				const uint32_t range_size = surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE;
-				const uint32_t offset = RendererRD::VirtualGeometryEffect::HEADER_SIZE + (camera_range ? 0 : range_size);
+				const uint32_t shadow_range = p_params->vg_window_range >= 0 ? RendererRD::VirtualGeometryEffect::WINDOW_RANGE_FIRST + p_params->vg_window_range : 1;
+				const uint32_t offset = RendererRD::VirtualGeometryEffect::HEADER_SIZE + (camera_range ? 0 : shadow_range * range_size);
 				if (virtual_geometry->uses_indirect_count()) {
 					// Camera ranges: early clusters (visible last frame) and late clusters (found by the occlusion pass).
 					if (!camera_range || p_params->vg_phase != 2) {
-						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t), surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t) * shadow_range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 					}
 					if (camera_range && p_params->vg_phase != 1) {
 						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + 2 * range_size, surf->vg_command_buffer, sizeof(uint32_t) * 2, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
@@ -3047,7 +3048,9 @@ bool RenderForwardClustered::_render_virtual_shadow(RID p_light, RSE::LightType 
 					vsm_window_instances.push_back(p_instances[i]);
 				}
 			}
+			vsm_window_range_next = (virtual_geometry && virtual_geometry->uses_window_culling() && vsm_window_ranges_used < RendererRD::VirtualGeometryEffect::WINDOW_RANGES) ? int32_t(vsm_window_ranges_used++) : -1;
 			_render_shadow_append(virtual_shadows->get_scratch_framebuffer(), vsm_window_instances, virtual_shadows->get_window_projection(*win), virtual_shadows->get_window_transform(*win), p_zfar, 0, 0, p_reverse_cull_face, false, false, p_use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, win->rect, true, true, false, false, p_render_info, p_viewport_size, p_main_cam_transform);
+			vsm_window_range_next = -1;
 		}
 	}
 	return handled;
@@ -3301,6 +3304,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 void RenderForwardClustered::_render_shadow_begin() {
 	scene_state.shadow_passes.clear();
+	vsm_window_ranges_used = 0;
 	RD::get_singleton()->draw_command_begin_label("Shadow Setup");
 	_update_render_base_uniform_set();
 
@@ -3380,6 +3384,9 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 		shadow_pass.rect = p_rect;
 
 		shadow_pass.uniform_buffer_index = uniform_buffer_index;
+		shadow_pass.vg_window_range = vsm_window_range_next;
+		shadow_pass.vg_window_transform = p_transform;
+		shadow_pass.vg_window_projection = p_projection;
 
 		scene_state.shadow_passes.push_back(shadow_pass);
 	}
@@ -3406,6 +3413,10 @@ void RenderForwardClustered::_render_shadow_end() {
 
 	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+		if (shadow_pass.vg_window_range >= 0) {
+			_virtual_geometry_select_window(shadow_pass);
+			render_list_parameters.vg_window_range = shadow_pass.vg_window_range;
+		}
 		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
 	}
 
@@ -4818,6 +4829,65 @@ void RenderForwardClustered::_virtual_geometry_dispatch(RD::ComputeListID p_comp
 	}
 }
 
+void RenderForwardClustered::_virtual_geometry_select_window(const SceneState::ShadowPass &p_pass) {
+	if (!virtual_geometry || p_pass.vg_window_range < 0) {
+		return;
+	}
+	LocalVector<GeometryInstanceSurfaceDataCache *> surfaces;
+	HashSet<GeometryInstanceSurfaceDataCache *> seen;
+	for (uint32_t i = 0; i < p_pass.element_count; i++) {
+		GeometryInstanceSurfaceDataCache *surf = render_list[RENDER_LIST_SECONDARY].elements[p_pass.element_from + i];
+		if (surf->vg_cluster_count == 0 || !surf->vg_command_buffer.is_valid() || !surf->vg_uniform_set.is_valid() || seen.has(surf)) {
+			continue;
+		}
+		seen.insert(surf);
+		surfaces.push_back(surf);
+	}
+	if (surfaces.is_empty()) {
+		return;
+	}
+	const uint32_t range = RendererRD::VirtualGeometryEffect::WINDOW_RANGE_FIRST + p_pass.vg_window_range;
+	const bool compact = virtual_geometry->uses_indirect_count();
+	if (compact) {
+		for (GeometryInstanceSurfaceDataCache *surf : surfaces) {
+			RD::get_singleton()->buffer_clear(surf->vg_command_buffer, sizeof(uint32_t) * range, sizeof(uint32_t));
+		}
+	}
+	RendererRD::VirtualGeometryEffect::PushConstant push_constant;
+	memset(&push_constant, 0, sizeof(push_constant));
+	const Projection &projection = p_pass.vg_window_projection;
+	for (int c = 0; c < 4; c++) {
+		for (int r = 0; r < 4; r++) {
+			push_constant.projection[c * 4 + r] = projection.columns[c][r];
+		}
+	}
+	// Window texels per unit at unit distance (per unit for orthographic windows), the shadow equivalent of the camera's pixels per unit.
+	const float window_height = p_pass.rect.size.y > 0 ? float(p_pass.rect.size.y) : 256.0f;
+	push_constant.lod_scale = window_height * 0.5f * Math::abs(projection.columns[1][1]) / MAX(virtual_geometry->get_pixel_error(), 0.01f);
+	uint32_t flags = RendererRD::VirtualGeometryEffect::FLAG_WINDOW | (uint32_t(p_pass.vg_window_range) << RendererRD::VirtualGeometryEffect::WINDOW_RANGE_SHIFT);
+	if (projection.is_orthogonal()) {
+		flags |= RendererRD::VirtualGeometryEffect::FLAG_ORTHOGONAL;
+	}
+	if (compact) {
+		flags |= RendererRD::VirtualGeometryEffect::FLAG_COMPACT;
+	}
+	if (virtual_geometry->collects_stats()) {
+		virtual_geometry->begin_frame_stats(Engine::get_singleton()->get_frames_drawn() + 1);
+		flags |= RendererRD::VirtualGeometryEffect::FLAG_STATS;
+	}
+	const Transform3D view = p_pass.vg_window_transform.affine_inverse();
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_pipeline());
+	for (GeometryInstanceSurfaceDataCache *surf : surfaces) {
+		_virtual_geometry_fill_push_constant(push_constant, view, surf);
+		push_constant.flags = flags; // Flat pass over every cluster: no hierarchy, occlusion or software raster for shadow windows.
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
+	}
+	RD::get_singleton()->compute_list_end();
+}
+
 void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion, bool p_software) {
 	virtual_geometry_camera_surface_count = 0;
 	virtual_geometry_software = false;
@@ -6020,8 +6090,11 @@ uint64_t RenderForwardClustered::get_virtual_geometry_info(RSE::RenderingInfo p_
 			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_CLUSTERS);
 		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME:
 			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_TRIANGLES);
-		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME:
-			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SHADOW_TRIANGLES);
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SHADOW_PRIMITIVES_IN_FRAME: {
+			// Triangles drawn into culled virtual shadow windows when there are any, otherwise the LOD-only shadow selection.
+			const uint64_t window = virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_WINDOW_TRIANGLES);
+			return window ? window : virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SHADOW_TRIANGLES);
+		}
 		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME:
 			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SOFTWARE_CLUSTERS);
 		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME:

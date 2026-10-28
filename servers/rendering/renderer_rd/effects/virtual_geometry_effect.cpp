@@ -73,6 +73,7 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 	stats_buffer = RD::get_singleton()->storage_buffer_create(zero.size(), zero);
 
 	occlusion_culling = GLOBAL_GET("rendering/virtual_geometry/occlusion_culling");
+	shadow_window_culling = GLOBAL_GET("rendering/virtual_geometry/shadow_window_culling");
 
 	Vector<String> modes;
 	modes.push_back("");

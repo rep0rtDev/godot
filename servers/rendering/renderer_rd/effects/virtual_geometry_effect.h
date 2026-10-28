@@ -53,6 +53,9 @@ public:
 	static constexpr uint32_t FLAG_HIERARCHY = 32;
 	// Small camera clusters go to the compute rasterizer; the size limit is packed in the upper flag bits.
 	static constexpr uint32_t FLAG_SOFTWARE = 64;
+	// Shadow window pass: frustum-cull against the window and write its own command range (index in the bits above SOFTWARE_LIMIT_SHIFT).
+	static constexpr uint32_t FLAG_WINDOW = 128;
+	static constexpr uint32_t WINDOW_RANGE_SHIFT = 16;
 	static constexpr uint32_t SOFTWARE_LIMIT_SHIFT = 16;
 	// Traversal dispatch size, candidate count and the software raster dispatch sizes, see create_work_buffer().
 	static constexpr uint32_t WORK_HEADER_SIZE = 64;
@@ -68,8 +71,12 @@ public:
 	};
 	// Draw counts (camera, shadow, late camera, software early, software late) padded to 32 bytes,
 	// followed by the five command ranges. The software ranges are only drawn by the color pass.
-	static constexpr uint32_t HEADER_SIZE = 32;
-	static constexpr uint32_t COMMAND_RANGES = 5;
+	// Counts for the camera, shadow, late, software and software-late ranges plus one per virtual shadow window culled this frame.
+	static constexpr uint32_t WINDOW_RANGE_FIRST = 5;
+	static constexpr uint32_t WINDOW_RANGES = 16;
+	static constexpr uint32_t COMMAND_RANGES = WINDOW_RANGE_FIRST + WINDOW_RANGES;
+	static constexpr uint32_t HEADER_SIZE = 96;
+	static_assert(HEADER_SIZE >= sizeof(uint32_t) * COMMAND_RANGES);
 
 	struct PushConstant {
 		float modelview[12];
@@ -108,6 +115,8 @@ public:
 		STAT_SHADOW_TRIANGLES,
 		STAT_SOFTWARE_CLUSTERS,
 		STAT_SOFTWARE_TRIANGLES,
+		STAT_WINDOW_CLUSTERS,
+		STAT_WINDOW_TRIANGLES,
 		STAT_MAX,
 	};
 
@@ -124,6 +133,7 @@ private:
 	RID hzb_shader_version;
 	RID hzb_pipelines[2];
 	bool occlusion_culling = true;
+	bool shadow_window_culling = true;
 	float pixel_error = 1.0f;
 	bool use_indirect_count = false;
 
@@ -190,6 +200,7 @@ public:
 	RID create_visibility_buffer(uint32_t p_cluster_count) const;
 	float get_pixel_error() const { return pixel_error; }
 	bool uses_indirect_count() const { return use_indirect_count; }
+	bool uses_window_culling() const { return shadow_window_culling; }
 	bool collects_stats() const { return collect_stats; }
 	bool can_rasterize_in_compute() const { return supports_software_raster; }
 	bool uses_software_raster() const { return software_raster; }
