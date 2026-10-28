@@ -12,6 +12,7 @@ var wall: MeshInstance3D
 var wall_off := -1
 var move_frame := -1
 var cam_move := 0.0
+var skin_skel: Skeleton3D
 var cam_x := 0.0
 var first_mi: MeshInstance3D
 var times := PackedFloat64Array()
@@ -156,6 +157,52 @@ func _init() -> void:
 		gp.position = Vector3(4.5, 2.5, -4.5)
 		gp.visibility_aabb = AABB(Vector3(-6, -3, -6), Vector3(12, 6, 12))
 		root.add_child(gp)
+	if arg("skin", "0") == "1":
+		# A skinned 1x4x1 box with two bones; the upper bone bends every frame (dynamic surface-cache cards).
+		skin_skel = Skeleton3D.new()
+		skin_skel.add_bone("root")
+		skin_skel.set_bone_rest(0, Transform3D())
+		skin_skel.add_bone("upper")
+		skin_skel.set_bone_parent(1, 0)
+		skin_skel.set_bone_rest(1, Transform3D(Basis(), Vector3(0, 2, 0)))
+		skin_skel.reset_bone_poses()
+		var skin_verts := PackedVector3Array()
+		var skin_norms := PackedVector3Array()
+		var skin_bones := PackedInt32Array()
+		var skin_weights := PackedFloat32Array()
+		var skin_idx := PackedInt32Array()
+		var skin_segs := 8
+		for i in range(skin_segs + 1):
+			var y := 4.0 * float(i) / float(skin_segs)
+			var w1 := clampf((y - 1.0) / 2.0, 0.0, 1.0)
+			for c in [Vector3(-0.5, 0, -0.5), Vector3(0.5, 0, -0.5), Vector3(0.5, 0, 0.5), Vector3(-0.5, 0, 0.5)]:
+				skin_verts.push_back(Vector3(c.x, y, c.z))
+				skin_norms.push_back(Vector3(c.x, 0, c.z).normalized())
+				skin_bones.append_array(PackedInt32Array([0, 1, 0, 0]))
+				skin_weights.append_array(PackedFloat32Array([1.0 - w1, w1, 0.0, 0.0]))
+		for i in range(skin_segs):
+			for k in range(4):
+				var a := i * 4 + k
+				var b := i * 4 + (k + 1) % 4
+				skin_idx.append_array(PackedInt32Array([a, b, a + 4, b, b + 4, a + 4]))
+		var skin_arrays := []
+		skin_arrays.resize(Mesh.ARRAY_MAX)
+		skin_arrays[Mesh.ARRAY_VERTEX] = skin_verts
+		skin_arrays[Mesh.ARRAY_NORMAL] = skin_norms
+		skin_arrays[Mesh.ARRAY_BONES] = skin_bones
+		skin_arrays[Mesh.ARRAY_WEIGHTS] = skin_weights
+		skin_arrays[Mesh.ARRAY_INDEX] = skin_idx
+		var skin_amesh := ArrayMesh.new()
+		skin_amesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, skin_arrays)
+		var skin_smat := StandardMaterial3D.new()
+		skin_smat.albedo_color = Color(0.1, 0.9, 0.2)
+		skin_amesh.surface_set_material(0, skin_smat)
+		var skin_smi := MeshInstance3D.new()
+		skin_smi.mesh = skin_amesh
+		skin_skel.add_child(skin_smi)
+		skin_smi.skeleton = skin_smi.get_path_to(skin_skel)
+		skin_skel.position = Vector3(4.5, 0, -4.5)
+		root.add_child(skin_skel)
 	var side := int(ceil(sqrt(count)))
 	for i in count:
 		var mi := MeshInstance3D.new()
@@ -275,6 +322,8 @@ func _init() -> void:
 	print("bench vg=%s count=%d tris_per_mesh=%d" % [use_vg, count, sm.get_mesh_arrays()[Mesh.ARRAY_INDEX].size() / 3])
 
 func _process(_delta: float) -> bool:
+	if skin_skel:
+		skin_skel.set_bone_pose_rotation(1, Quaternion(Vector3(0, 0, 1), sin(float(frame) * 0.1) * 0.8))
 	if cam_move != 0.0 and cam and frame > 0:
 		cam.position.x += cam_move
 	frame += 1
