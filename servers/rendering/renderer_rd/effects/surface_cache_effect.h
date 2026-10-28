@@ -97,7 +97,8 @@ public:
 	RID get_final_texture() const { return final; }
 	bool screen_probes_enabled() const { return screen_probes; }
 	// Screen probes traced into the surface cache, resolved into the GI ambient buffer (alpha 1 where valid).
-	void screen_probes_pass(RID p_depth, RID p_normal_roughness, RID p_ambient, const Size2i &p_internal_size, const Size2i &p_ambient_size, const Projection &p_projection, const Transform3D &p_cam_transform);
+	void screen_probes_pass(RID p_depth, RID p_normal_roughness, RID p_ambient, RID p_reflection, const Size2i &p_internal_size, const Size2i &p_ambient_size, const Projection &p_projection, const Transform3D &p_cam_transform);
+	RID get_last_reflection_texture() const { return last_reflection; }
 	RID get_probe_texture() const { return probes; }
 	RID get_screen_probe_texture() const { return screen_probe_texture; }
 	RID get_last_ambient_texture() const { return last_ambient; }
@@ -126,6 +127,10 @@ private:
 	RID screen_uniform_set_depth;
 	RID screen_uniform_set_ambient;
 	RID last_ambient;
+	RID last_reflection;
+	RID reflection_history;
+	Size2i reflection_history_size;
+	RID screen_uniform_set_reflection;
 	uint32_t debug_mode = 0;
 	int atlas_size = 4096;
 	int cards_per_frame = 300;
@@ -174,6 +179,7 @@ private:
 		LIGHT_MODE_RESOLVE,
 		LIGHT_MODE_SCREEN_PROBES,
 		LIGHT_MODE_SCREEN_RESOLVE,
+		LIGHT_MODE_SCREEN_REFLECT,
 		LIGHT_MODE_MAX
 	};
 	RID light_pipelines[LIGHT_MODE_MAX];

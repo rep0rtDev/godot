@@ -116,7 +116,7 @@ vec3 sky_radiance(vec3 dir) {
 	return params.sky.rgb;
 }
 
-#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE)
+#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE) || defined(MODE_SCREEN_REFLECT)
 // Screen probes: one per SCREEN_PROBE_SIZE pixels, cosine rays through the SDF into the surface cache, resolved into
 // the GI ambient buffer the forward pass already reads.
 #define SCREEN_PROBE_SIZE 16
@@ -126,6 +126,9 @@ layout(set = 2, binding = 0) uniform texture2D depth_buffer;
 layout(set = 2, binding = 1) uniform texture2D normal_roughness_buffer;
 layout(set = 2, binding = 2, rgba16f) uniform restrict image2D screen_probe_image; // rgb radiance, a view depth.
 layout(set = 2, binding = 3, rgba16f) uniform restrict writeonly image2D ambient_image;
+layout(set = 2, binding = 5, rgba16f) uniform restrict writeonly image2D reflection_image;
+layout(set = 2, binding = 6, rgba16f) uniform restrict image2D reflection_history; // rgb radiance, a view depth.
+
 layout(set = 2, binding = 4, std140) uniform Screen {
 	mat4 inv_projection;
 	mat4 cam_transform;
@@ -145,6 +148,14 @@ bool screen_position(ivec2 pixel, out vec3 r_view, out vec3 r_normal) {
 	}
 	r_normal = normalize(texelFetch(sampler2D(normal_roughness_buffer, nearest_sampler), pixel, 0).xyz * 2.0 - 1.0);
 	return true;
+}
+
+float screen_roughness(ivec2 pixel) {
+	float roughness = texelFetch(sampler2D(normal_roughness_buffer, nearest_sampler), pixel, 0).w;
+	if (roughness > 0.5) {
+		roughness = 1.0 - roughness; // Dynamic object flag.
+	}
+	return roughness / (127.0 / 255.0);
 }
 #endif
 
@@ -350,7 +361,7 @@ float hash1(vec3 p) {
 }
 
 void main() {
-#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE)
+#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE) || defined(MODE_SCREEN_REFLECT)
 	ivec2 local = ivec2(gl_GlobalInvocationID.xy);
 #else
 	CardData card = cards.data[push.card];
@@ -410,6 +421,62 @@ void main() {
 	// Keep history while the probe stays on the same surface (camera still or slow).
 	float w = (prev.a > 0.0 && abs(prev.a - depth) < 0.05 * depth) ? 0.125 : 1.0;
 	imageStore(screen_probe_image, local, vec4(mix(prev.rgb, mean, w), depth));
+#endif
+
+#ifdef MODE_SCREEN_REFLECT
+	// One glossy ray per reflection-buffer pixel: reflected view direction jittered inside a cone that grows with
+	// roughness, traced through the SDF into the surface cache, sky on miss. Rough surfaces keep the probe result.
+	if (any(greaterThanEqual(local, ivec2(screen.size.zw)))) {
+		return;
+	}
+	ivec2 pixel = ivec2((vec2(local) + 0.5) * screen.size.xy / screen.size.zw);
+	vec3 view_pos, view_normal;
+	if (!screen_position(pixel, view_pos, view_normal)) {
+		imageStore(reflection_image, local, vec4(0.0));
+		imageStore(reflection_history, local, vec4(0.0));
+		return;
+	}
+	float roughness = screen_roughness(pixel);
+	float weight = 1.0 - smoothstep(0.5, 0.8, roughness);
+	if (weight <= 0.0) {
+		imageStore(reflection_image, local, vec4(0.0));
+		imageStore(reflection_history, local, vec4(0.0));
+		return;
+	}
+	vec3 world = (screen.cam_transform * vec4(view_pos, 1.0)).xyz;
+	vec3 normal = normalize(mat3(screen.cam_transform) * view_normal);
+	vec3 view_dir = normalize(mat3(screen.cam_transform) * view_pos);
+	vec3 refl = reflect(view_dir, normal);
+	float frame = screen.misc.y;
+	vec2 u = vec2(hash1(vec3(local, frame)), hash1(vec3(local.yx, frame + 17.0)));
+	// Cone around the reflection: half angle ~ roughness^2 * 60 degrees.
+	float cone = roughness * roughness * 1.05;
+	float phi = 2.0 * M_PI * u.x;
+	float ct = mix(1.0, cos(cone), u.y);
+	float st = sqrt(max(0.0, 1.0 - ct * ct));
+	vec3 rt = normalize(abs(refl.y) < 0.99 ? cross(refl, vec3(0, 1, 0)) : cross(refl, vec3(1, 0, 0)));
+	vec3 rb = cross(refl, rt);
+	vec3 dir = normalize(rt * (cos(phi) * st) + rb * (sin(phi) * st) + refl * ct);
+	if (dot(dir, normal) <= 0.0) {
+		dir = refl;
+	}
+	vec3 origin = world + normal * 0.02;
+	vec3 hit;
+	int cascade;
+	vec3 radiance = sky_radiance(dir);
+	if (sdf_trace(origin, dir, 200.0, hit, cascade)) {
+		vec3 hn = sdf_normal(hit, cascade);
+		float cell_size = 1.0 / sdf.cascades[cascade].w;
+		if (!sample_cards(hit, hn, 1.5 * cell_size, radiance)) {
+			radiance = vec3(0.0);
+		}
+	}
+	float depth = -view_pos.z;
+	vec4 prev = imageLoad(reflection_history, local);
+	float w = (prev.a > 0.0 && abs(prev.a - depth) < 0.05 * depth) ? mix(0.5, 0.1, clamp(roughness * 2.0, 0.0, 1.0)) : 1.0;
+	vec3 acc = mix(prev.rgb, radiance, w);
+	imageStore(reflection_history, local, vec4(acc, depth));
+	imageStore(reflection_image, local, vec4(acc, weight));
 #endif
 
 #ifdef MODE_SCREEN_RESOLVE

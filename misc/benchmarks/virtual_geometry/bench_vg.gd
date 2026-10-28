@@ -102,6 +102,12 @@ func _init() -> void:
 		var floor_mi := MeshInstance3D.new()
 		floor_mi.mesh = floor_mesh
 		floor_mi.position = Vector3(0, -3, 0)
+		if arg("rough", "") != "":
+			var fm := StandardMaterial3D.new()
+			fm.albedo_color = Color(0.8, 0.8, 0.8)
+			fm.roughness = float(arg("rough", "1"))
+			fm.metallic = 0.0
+			floor_mi.material_override = fm
 		root.add_child(floor_mi)
 	if arg("spot", "0") == "1":
 		var spot := SpotLight3D.new()

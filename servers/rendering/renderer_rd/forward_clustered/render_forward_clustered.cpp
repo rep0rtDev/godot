@@ -2469,7 +2469,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (using_sdfgi && surface_cache->screen_probes_enabled() && rb_data.is_valid() && rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
 				RENDER_TIMESTAMP("Surface Cache Screen Probes");
 				RD::TextureFormat atf = rb->get_texture_format(RB_SCOPE_GI, RB_TEX_AMBIENT);
-				surface_cache->screen_probes_pass(rb->get_depth_texture(), rb_data->get_normal_roughness(0), rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT), rb->get_internal_size(), Size2i(atf.width, atf.height), p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform);
+				surface_cache->screen_probes_pass(rb->get_depth_texture(), rb_data->get_normal_roughness(0), rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT), rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION), rb->get_internal_size(), Size2i(atf.width, atf.height), p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform);
 			}
 			if (OS::get_singleton()->is_stdout_verbose() && (RSG::rasterizer->get_frame_number() % 30) == 0) {
 				const RendererRD::SurfaceCacheEffect::Stats &st = surface_cache->get_stats();
@@ -2915,6 +2915,9 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 				break;
 			case 12:
 				atlas = surface_cache->get_last_ambient_texture();
+				break;
+			case 13:
+				atlas = surface_cache->get_last_reflection_texture();
 				break;
 			default:
 				atlas = surface_cache->get_final_texture();
