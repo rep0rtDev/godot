@@ -51,6 +51,7 @@ public:
 		float sharpness = 0.0f;
 		float reactive = 1.0f; // Weight of the transparency reactive mask (needs copy_opaque before the transparent pass).
 		Projection reprojection; // Clip space of this frame to clip space of the previous one, for static geometry.
+		bool reset = false; // Camera cut: drop the history instead of reprojecting it.
 	};
 
 	TSREffect();

@@ -12,6 +12,7 @@ var wall: MeshInstance3D
 var wall_off := -1
 var move_frame := -1
 var anim := false
+var cut_frame := -1
 var anim_base := Vector3()
 var shadow_tris_max := 0
 var cam_move := 0.0
@@ -266,6 +267,7 @@ func _init() -> void:
 	wall_off = int(arg("wall_off", "-1"))
 	move_frame = int(arg("move", "-1"))
 	anim = arg("anim", "0") == "1"
+	cut_frame = int(arg("cut", "-1"))
 	cam_move = float(arg("cam_move", "0"))
 	cam_x = float(arg("cam_x", "0"))
 	if arg("backdrop", "0") == "1":
@@ -331,6 +333,8 @@ func _process(_delta: float) -> bool:
 	if cam_move != 0.0 and cam and frame > 0:
 		cam.position.x += cam_move
 	frame += 1
+	if cam and frame == cut_frame:
+		cam.position.x += 5.0 # Camera cut: same jump as --cam_x=5.
 	if first_mi and anim:
 		# Keeps one caster moving so that its shadow pages are redrawn every frame.
 		if frame == 1:

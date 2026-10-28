@@ -2800,6 +2800,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
 				const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
 				params.reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
+				// The engine has no camera-cut event; a jump larger than a camera can make in one frame is treated as one.
+				const float cut_distance = GLOBAL_GET_CACHED(float, "rendering/scaling_3d/tsr_cut_distance");
+				const float cut_angle = GLOBAL_GET_CACHED(float, "rendering/scaling_3d/tsr_cut_angle");
+				const float moved = (cur_transform.origin - prev_transform.origin).length();
+				const float turned = Math::rad_to_deg(cur_transform.basis.get_column(2).angle_to(prev_transform.basis.get_column(2)));
+				params.reset = (cut_distance > 0.0f && moved > cut_distance) || (cut_angle > 0.0f && turned > cut_angle);
 				tsr_effect->process(rb, params);
 			}
 			RD::get_singleton()->draw_command_end_label();

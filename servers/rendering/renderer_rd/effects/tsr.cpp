@@ -69,7 +69,7 @@ void TSREffect::copy_opaque(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_co
 void TSREffect::process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parameters &p_params) {
 	static const StringName context = SNAME("TSR");
 	static const StringName names[2] = { SNAME("history0"), SNAME("history1") };
-	bool reset = false;
+	bool reset = p_params.reset;
 	if (!p_render_buffers->has_texture(context, names[0])) {
 		for (int i = 0; i < 2; i++) {
 			p_render_buffers->create_texture(context, names[i], RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT, RD::TEXTURE_SAMPLES_1, p_params.target_size);
