@@ -3779,6 +3779,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/radiance_cache", true);
 	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/radiance_cache_spacing", 1.0);
 	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/radiance_cache_visibility", true);
+	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/dynamic_instances", true);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/dynamic_recapture_frames", PROPERTY_HINT_RANGE, "0,64,1"), 8);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/atlas_size", PROPERTY_HINT_ENUM, "1024,2048,4096"), 4096);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/cards_per_frame", PROPERTY_HINT_RANGE, "1,2000,1"), 300);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/surface_cache/texels_per_meter", PROPERTY_HINT_RANGE, "1,100,1"), 10.0);

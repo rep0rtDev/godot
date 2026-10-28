@@ -163,6 +163,17 @@ func _init() -> void:
 			wmi.mesh = bm
 			wmi.position = wdef[1]
 			root.add_child(wmi)
+	if arg("multimesh", "0") == "1":
+		# A MultiMesh row behind the grid: its cards come from the dynamic-instance path.
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = meshes[0]
+		mm.instance_count = 8
+		for k in 8:
+			mm.set_instance_transform(k, Transform3D(Basis(), Vector3(side * 1.5 - 10.5 + k * 3.0, 0, -(side - 1) * 3.0 - 3.0)))
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		root.add_child(mmi)
 	wall_off = int(arg("wall_off", "-1"))
 	move_frame = int(arg("move", "-1"))
 	cam_move = float(arg("cam_move", "0"))

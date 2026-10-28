@@ -60,6 +60,7 @@ public:
 		AABB aabb; // Object space.
 		uint64_t last_seen = 0;
 		uint32_t first_card = 0xFFFFFFFF; // Block of 6 card slots, one per axis.
+		bool dynamic = false; // Skinned or multimesh: recaptured on a schedule.
 	};
 
 	struct Stats {
@@ -137,6 +138,8 @@ private:
 	RID radiance_cache_texture;
 	RID radiance_meta_buffer;
 	RID radiance_cache_depth;
+	bool dynamic_instances = true;
+	int dynamic_recapture_frames = 8;
 	bool radiance_cache_enabled = false;
 	void _ensure_radiance_cache();
 	static const uint32_t RADIANCE_PROBES = 16;

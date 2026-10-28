@@ -55,6 +55,8 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	screen_probes = GLOBAL_GET("rendering/global_illumination/surface_cache/screen_probes");
 	atlas_size = GLOBAL_GET("rendering/global_illumination/surface_cache/atlas_size");
 	cards_per_frame = GLOBAL_GET("rendering/global_illumination/surface_cache/cards_per_frame");
+	dynamic_instances = GLOBAL_GET("rendering/global_illumination/surface_cache/dynamic_instances");
+	dynamic_recapture_frames = GLOBAL_GET("rendering/global_illumination/surface_cache/dynamic_recapture_frames");
 	texel_density = GLOBAL_GET("rendering/global_illumination/surface_cache/texels_per_meter");
 	max_card_size = GLOBAL_GET("rendering/global_illumination/surface_cache/max_card_size");
 
@@ -296,12 +298,15 @@ void SurfaceCacheEffect::begin_frame(uint64_t p_frame, const PagedArray<RenderGe
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	for (uint64_t i = 0; i < p_instances.size(); i++) {
 		RenderGeometryInstanceBase *gi = static_cast<RenderGeometryInstanceBase *>(p_instances[i]);
-		if (gi->data->base_type != RSE::INSTANCE_MESH || gi->data->skeleton.is_valid()) {
-			continue; // Multimesh, particles and skinned meshes are not cached yet.
+		bool multimesh = gi->data->base_type == RSE::INSTANCE_MULTIMESH;
+		bool dynamic = multimesh || gi->data->skeleton.is_valid();
+		if ((gi->data->base_type != RSE::INSTANCE_MESH && !multimesh) || (dynamic && !dynamic_instances)) {
+			continue; // Particles are not cached yet.
 		}
 		uint32_t id;
 		HashMap<RenderGeometryInstance *, uint32_t>::Iterator it = instance_map.find(gi);
-		AABB aabb = mesh_storage->mesh_get_aabb(gi->data->base);
+		// Skinned meshes use the rest pose bounds: the cards are recaptured periodically but not re-fitted.
+		AABB aabb = multimesh ? mesh_storage->multimesh_get_aabb(gi->data->base) : mesh_storage->mesh_get_aabb(gi->data->base);
 		if (it) {
 			id = it->value;
 			Instance &inst = instances[id];
@@ -310,12 +315,20 @@ void SurfaceCacheEffect::begin_frame(uint64_t p_frame, const PagedArray<RenderGe
 				inst.transform = gi->transform;
 				inst.aabb = aabb;
 				_build_cards(id);
+			} else if (inst.dynamic && dynamic_recapture_frames > 0 && (frame % uint64_t(dynamic_recapture_frames)) == (uint64_t(id) % uint64_t(dynamic_recapture_frames)) && inst.first_card != 0xFFFFFFFF) {
+				// Animated geometry changes shape without moving: recapture its cards in place on a rolling schedule.
+				for (uint32_t c = inst.first_card; c < inst.first_card + 6; c++) {
+					if (cards[c].rect.size != Size2i()) {
+						cards[c].dirty = true;
+					}
+				}
 			}
 		} else {
 			Instance inst;
 			inst.geometry = gi;
 			inst.transform = gi->transform;
 			inst.aabb = aabb;
+			inst.dynamic = dynamic;
 			inst.last_seen = frame;
 			if (free_instances.size()) {
 				id = free_instances[free_instances.size() - 1];
