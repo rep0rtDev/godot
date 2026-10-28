@@ -110,7 +110,16 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4 + sizeof(float) * 8);
 	grid_buffer = RD::get_singleton()->storage_buffer_create(GRID * GRID * GRID * GRID_SLOTS * sizeof(uint32_t));
 	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8));
-	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 9);
+	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 12);
+	{
+		RD::TextureFormat stf;
+		stf.width = 1;
+		stf.height = 1;
+		stf.format = RD::DATA_FORMAT_R8G8B8A8_UNORM;
+		stf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		dummy_sky_tex = RD::get_singleton()->texture_create(stf, RD::TextureView());
+		RD::get_singleton()->texture_clear(dummy_sky_tex, Color(0, 0, 0, 1), 0, 1, 0, 1);
+	}
 	{
 		RD::TextureFormat dtf;
 		dtf.texture_type = RD::TEXTURE_TYPE_3D;
@@ -130,7 +139,7 @@ SurfaceCacheEffect::~SurfaceCacheEffect() {
 	if (light_shader_version.is_valid()) {
 		light_shader.version_free(light_shader_version);
 	}
-	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, screen_probe_texture, screen_params_buffer }) {
+	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, dummy_sky_tex, screen_probe_texture, screen_params_buffer }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -392,7 +401,7 @@ void SurfaceCacheEffect::capture(CaptureFunction p_capture, void *p_userdata) {
 	capture_list.clear();
 }
 
-void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult, const Vector3 &p_sky_radiance) {
+void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult, const Vector3 &p_sky_radiance, const SkyInfo &p_sky) {
 	// Cards to light: captured this frame plus every light_share-th resident card.
 	LocalVector<uint32_t> todo;
 	for (uint32_t id : captured_this_frame) {
@@ -534,7 +543,7 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 	params.sky[3] = float(frame % 4096);
 	RD::get_singleton()->buffer_update(light_params_buffer, 0, sizeof(Params), &params);
 	{
-		float sdf_params[4 * 9] = {};
+		float sdf_params[4 * 12] = {};
 		sdf_params[0] = float(p_sdf_grid_size);
 		sdf_params[1] = p_sdf_y_mult;
 		sdf_params[2] = float(MIN(p_sdf_cascades.size(), 8));
@@ -544,6 +553,17 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 			sdf_params[4 + i * 4 + 2] = p_sdf_offsets[i].z;
 			sdf_params[4 + i * 4 + 3] = p_sdf_offsets[i].w;
 		}
+		sdf_params[36] = float(p_sky.mode);
+		sdf_params[37] = p_sky.energy;
+		sdf_params[38] = p_sky.border;
+		sdf_params[39] = 1.0f - p_sky.border * 2.0f;
+		sdf_params[40] = p_sky.color.x;
+		sdf_params[41] = p_sky.color.y;
+		sdf_params[42] = p_sky.color.z;
+		sdf_params[44] = p_sky.orientation.x;
+		sdf_params[45] = p_sky.orientation.y;
+		sdf_params[46] = p_sky.orientation.z;
+		sdf_params[47] = p_sky.orientation.w;
 		RD::get_singleton()->buffer_update(sdf_params_buffer, 0, sizeof(sdf_params), sdf_params);
 	}
 
@@ -584,7 +604,8 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 	for (int i = 0; i < 8; i++) {
 		sdf_textures.push_back(i < p_sdf_cascades.size() ? p_sdf_cascades[i] : dummy_sdf_tex);
 	}
-	if (sdf_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set) || sdf_uniform_set_textures != sdf_textures) {
+	RID sky_tex = p_sky.octmap.is_valid() ? p_sky.octmap : dummy_sky_tex;
+	if (sdf_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set) || sdf_uniform_set_textures != sdf_textures || sdf_uniform_set_sky != sky_tex) {
 		Vector<RD::Uniform> su;
 		RD::Uniform u;
 		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
@@ -598,11 +619,17 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 			t.append_id(r);
 		}
 		su.push_back(t);
+		RD::Uniform sk;
+		sk.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		sk.binding = 2;
+		sk.append_id(sky_tex);
+		su.push_back(sk);
 		if (sdf_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
 			RD::get_singleton()->free_rid(sdf_uniform_set);
 		}
 		sdf_uniform_set = RD::get_singleton()->uniform_set_create(su, shader, 1);
 		sdf_uniform_set_textures = sdf_textures;
+		sdf_uniform_set_sky = sky_tex;
 	}
 
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();

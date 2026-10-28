@@ -20,6 +20,7 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #include "../light_data_inc.glsl"
+#include "../oct_inc.glsl"
 
 struct CardData {
 	ivec4 rect;
@@ -92,10 +93,28 @@ layout(set = 0, binding = 15, rgba16f) uniform restrict image2D final_image;
 layout(set = 1, binding = 0, std140) uniform Sdf {
 	vec4 info;
 	vec4 cascades[MAX_CASCADES];
+	vec4 sky_params; // mode (0 ambient color, 1 background color, 2 sky octmap), energy, border offset, border scale.
+	vec4 sky_color;
+	vec4 sky_quat; // World to sky orientation.
 }
 sdf;
 
 layout(set = 1, binding = 1) uniform texture3D sdf_cascades[MAX_CASCADES];
+layout(set = 1, binding = 2) uniform texture2D sky_octmap;
+
+// Radiance of the sky in a world direction, for rays that leave the scene.
+vec3 sky_radiance(vec3 dir) {
+	int mode = int(sdf.sky_params.x);
+	if (mode == 2) {
+		vec4 q = sdf.sky_quat;
+		vec3 sky_dir = dir + 2.0 * cross(q.xyz, cross(q.xyz, dir) + q.w * dir);
+		return textureLod(sampler2D(sky_octmap, linear_sampler), vec3_to_oct_with_border(sky_dir, sdf.sky_params.zw), 0.0).rgb * sdf.sky_params.y;
+	}
+	if (mode == 1) {
+		return sdf.sky_color.rgb * sdf.sky_params.y;
+	}
+	return params.sky.rgb;
+}
 
 #if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE)
 // Screen probes: one per SCREEN_PROBE_SIZE pixels, cosine rays through the SDF into the surface cache, resolved into
@@ -367,7 +386,7 @@ void main() {
 		vec3 dir = tangent * (cos(phi) * sr) + bitangent * (sin(phi) * sr) + normal * sqrt(max(0.0, 1.0 - u.y));
 		vec3 hit;
 		int cascade;
-		vec3 radiance = params.sky.rgb;
+		vec3 radiance = sky_radiance(dir);
 		if (sdf_trace(origin, dir, 100.0, hit, cascade)) {
 			hits++;
 			vec3 hn = sdf_normal(hit, cascade);
@@ -545,7 +564,7 @@ void main() {
 		vec3 dir = tangent * (cos(phi) * sr) + bitangent * (sin(phi) * sr) + normal * sqrt(max(0.0, 1.0 - u.y));
 		vec3 hit;
 		int cascade;
-		vec3 radiance = params.sky.rgb;
+		vec3 radiance = sky_radiance(dir);
 		if (sdf_trace(origin, dir, 100.0, hit, cascade)) {
 			hits++;
 			vec3 hn = sdf_normal(hit, cascade);

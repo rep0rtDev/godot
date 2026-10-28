@@ -2438,6 +2438,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				}
 			}
 			Vector3 sky_radiance;
+			RendererRD::SurfaceCacheEffect::SkyInfo sky_info;
 			if (is_environment(p_render_data->environment)) {
 				RID env = p_render_data->environment;
 				Color c = environment_get_ambient_light(env);
@@ -2447,8 +2448,24 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					e = environment_get_bg_energy_multiplier(env);
 				}
 				sky_radiance = Vector3(c.r, c.g, c.b) * e;
+				RSE::EnvironmentBG bg = environment_get_background(env);
+				if (bg == RSE::ENV_BG_COLOR || bg == RSE::ENV_BG_CLEAR_COLOR) {
+					Color bc = bg == RSE::ENV_BG_COLOR ? environment_get_bg_color(env) : RSG::texture_storage->get_default_clear_color().srgb_to_linear();
+					sky_info.mode = 1;
+					sky_info.color = Vector3(bc.r, bc.g, bc.b);
+					sky_info.energy = environment_get_bg_energy_multiplier(env);
+				} else if (bg == RSE::ENV_BG_SKY) {
+					RendererRD::SkyRD::Sky *sky_ptr = sky.get_sky(environment_get_sky(env));
+					if (sky_ptr && sky_ptr->reflection.radiance_base_octmap.is_valid()) {
+						sky_info.mode = 2;
+						sky_info.energy = environment_get_bg_energy_multiplier(env);
+						sky_info.border = sky_ptr->uv_border_size;
+						sky_info.orientation = environment_get_sky_orientation(env).get_quaternion().inverse();
+						sky_info.octmap = sky_ptr->reflection.radiance_base_octmap;
+					}
+				}
 			}
-			surface_cache->light_cards(ls->get_directional_light_buffer(), p_render_data->directional_light_count, ls->get_omni_light_buffer(), ls->get_omni_light_count(), ls->get_spot_light_buffer(), ls->get_spot_light_count(), p_render_data->scene_data->cam_transform, sdf_cascades, sdf_offsets, sdf_grid_size, sdf_y_mult, sky_radiance);
+			surface_cache->light_cards(ls->get_directional_light_buffer(), p_render_data->directional_light_count, ls->get_omni_light_buffer(), ls->get_omni_light_count(), ls->get_spot_light_buffer(), ls->get_spot_light_count(), p_render_data->scene_data->cam_transform, sdf_cascades, sdf_offsets, sdf_grid_size, sdf_y_mult, sky_radiance, sky_info);
 			if (using_sdfgi && surface_cache->screen_probes_enabled() && rb_data.is_valid() && rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
 				RENDER_TIMESTAMP("Surface Cache Screen Probes");
 				RD::TextureFormat atf = rb->get_texture_format(RB_SCOPE_GI, RB_TEX_AMBIENT);

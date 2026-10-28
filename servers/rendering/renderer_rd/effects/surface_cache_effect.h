@@ -71,6 +71,14 @@ public:
 		uint32_t lit = 0;
 	};
 
+	struct SkyInfo {
+		int mode = 0; // 0 ambient color, 1 background color, 2 sky octmap.
+		Vector3 color;
+		float energy = 1.0f;
+		Quaternion orientation;
+		float border = 0.0f;
+		RID octmap;
+	};
 	typedef void (*CaptureFunction)(void *p_userdata, const Transform3D &p_transform, const Projection &p_projection, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_rect);
 
 	static SurfaceCacheEffect *get_singleton();
@@ -84,7 +92,7 @@ public:
 	void capture(CaptureFunction p_capture, void *p_userdata);
 	// Direct lighting of cards captured this frame plus a round-robin share of the rest. Light buffers are in the
 	// camera view space given by p_view_to_world; SDF cascades (may be empty) give shadows.
-	void light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult, const Vector3 &p_sky_radiance);
+	void light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult, const Vector3 &p_sky_radiance, const SkyInfo &p_sky);
 	RID get_direct_texture() const { return direct; }
 	RID get_final_texture() const { return final; }
 	bool screen_probes_enabled() const { return screen_probes; }
@@ -185,6 +193,8 @@ private:
 	RID sdf_params_buffer;
 	RID dummy_sdf_tex;
 	Vector<RID> sdf_uniform_set_textures;
+	RID sdf_uniform_set_sky;
+	RID dummy_sky_tex;
 	LocalVector<uint32_t> captured_this_frame;
 	uint32_t light_round_robin = 0;
 	uint32_t light_share = 8;

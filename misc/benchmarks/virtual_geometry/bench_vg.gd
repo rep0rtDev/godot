@@ -156,6 +156,16 @@ func _init() -> void:
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 		var amb := float(arg("ambient", "-1"))
 		env.ambient_light_color = Color(0.2, 0.2, 0.25) if amb < 0.0 else Color(amb, amb, amb)
+		if arg("sky", "0") == "1":
+			env.background_mode = Environment.BG_SKY
+			var sky := Sky.new()
+			var sky_mat := ProceduralSkyMaterial.new()
+			sky_mat.sky_top_color = Color(0.1, 0.3, 1.0)
+			sky_mat.sky_horizon_color = Color(0.1, 0.3, 1.0)
+			sky_mat.ground_bottom_color = Color(0.1, 0.3, 1.0)
+			sky_mat.ground_horizon_color = Color(0.1, 0.3, 1.0)
+			sky.sky_material = sky_mat
+			env.sky = sky
 		env.sdfgi_enabled = true
 		env.sdfgi_cascades = 4
 		env.sdfgi_min_cell_size = 0.2
