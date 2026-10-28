@@ -149,6 +149,20 @@ func _init() -> void:
 		pm.albedo_color = Color(1, 0.1, 0.1)
 		plate.material_override = pm
 		root.add_child(plate)
+	if arg("room", "0") == "1":
+		# Closed room around the camera (walls down to the floor, ceiling): a light leak test, nothing outside should show.
+		var cx := side * 1.5
+		var walls := [
+			[Vector3(0.3, 13, 12.3), Vector3(cx - 6, 3.5, 8)], [Vector3(0.3, 13, 12.3), Vector3(cx + 6, 3.5, 8)],
+			[Vector3(12.3, 13, 0.3), Vector3(cx, 3.5, 2)], [Vector3(12.3, 13, 0.3), Vector3(cx, 3.5, 14)],
+			[Vector3(12.3, 0.3, 12.3), Vector3(cx, 10, 8)]]
+		for wdef in walls:
+			var bm := BoxMesh.new()
+			bm.size = wdef[0]
+			var wmi := MeshInstance3D.new()
+			wmi.mesh = bm
+			wmi.position = wdef[1]
+			root.add_child(wmi)
 	wall_off = int(arg("wall_off", "-1"))
 	move_frame = int(arg("move", "-1"))
 	cam_move = float(arg("cam_move", "0"))

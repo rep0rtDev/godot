@@ -139,7 +139,7 @@ SurfaceCacheEffect::~SurfaceCacheEffect() {
 	if (light_shader_version.is_valid()) {
 		light_shader.version_free(light_shader_version);
 	}
-	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, dummy_sky_tex, screen_probe_texture[0], screen_probe_texture[1], reflection_history[0], reflection_history[1], radiance_cache_texture, radiance_meta_buffer, screen_params_buffer }) {
+	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, dummy_sky_tex, screen_probe_texture[0], screen_probe_texture[1], reflection_history[0], reflection_history[1], radiance_cache_texture, radiance_cache_depth, radiance_meta_buffer, screen_params_buffer }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -568,7 +568,7 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		radiance_cache_enabled = GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache");
 		sdf_params[48] = MAX(rc_spacing, 0.1f);
 		sdf_params[49] = sdf_params[48] * 4.0f;
-		sdf_params[50] = radiance_cache_enabled ? 1.0f : 0.0f;
+		sdf_params[50] = radiance_cache_enabled ? (GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache_visibility") ? 2.0f : 1.0f) : 0.0f;
 		sdf_params[51] = float(RADIANCE_PROBES_PER_FRAME);
 		sdf_params[52] = p_view_to_world.origin.x;
 		sdf_params[53] = p_view_to_world.origin.y;
@@ -645,6 +645,11 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		rm.binding = 4;
 		rm.append_id(radiance_meta_buffer);
 		su.push_back(rm);
+		RD::Uniform rd;
+		rd.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+		rd.binding = 5;
+		rd.append_id(radiance_cache_depth);
+		su.push_back(rd);
 		if (sdf_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
 			RD::get_singleton()->free_rid(sdf_uniform_set);
 		}
@@ -686,6 +691,10 @@ void SurfaceCacheEffect::_ensure_radiance_cache() {
 		radiance_cache_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
 		RD::get_singleton()->set_resource_name(radiance_cache_texture, "Surface cache radiance cache");
 		RD::get_singleton()->texture_clear(radiance_cache_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		tf.format = RD::DATA_FORMAT_R16G16_SFLOAT;
+		radiance_cache_depth = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		RD::get_singleton()->set_resource_name(radiance_cache_depth, "Surface cache radiance cache depth");
+		RD::get_singleton()->texture_clear(radiance_cache_depth, Color(0, 0, 0, 0), 0, 1, 0, 1);
 		Vector<uint8_t> zero;
 		zero.resize(RADIANCE_CLIPMAPS * RADIANCE_PROBES * RADIANCE_PROBES * RADIANCE_PROBES * 16);
 		memset(zero.ptrw(), 0, zero.size());

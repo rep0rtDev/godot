@@ -110,6 +110,7 @@ layout(set = 1, binding = 2) uniform texture2D sky_octmap;
 #define RC_CLIPMAPS 4
 #define RC_OCT 8
 layout(set = 1, binding = 3, rgba16f) uniform restrict image2D radiance_cache;
+layout(set = 1, binding = 5, rg16f) uniform restrict image2D radiance_cache_depth; // Mean hit distance and its square per texel.
 layout(set = 1, binding = 4, std430) restrict buffer RcMeta {
 	ivec4 cells[]; // World cell of the probe in each slot, w = 1 when traced.
 }
@@ -165,6 +166,19 @@ bool rc_sample(vec3 p, vec3 dir, vec3 n, out vec3 r_radiance) {
 			float w = cw.x * cw.y * cw.z;
 			vec3 probe_pos = (vec3(cell) + 0.5) * spacing;
 			w *= smoothstep(-0.1, 0.1, dot(normalize(probe_pos - p), n));
+			if (sdf.rc_params.z > 1.5) {
+				// Visibility: Chebyshev test of the distance to p against the probe's hit distances in that direction.
+				vec3 to_p = p - probe_pos;
+				float d = length(to_p);
+				if (d > 1e-3) {
+					ivec2 vt = clamp(ivec2(vec3_to_oct(to_p / d) * float(RC_OCT)), ivec2(0), ivec2(RC_OCT - 1));
+					vec2 m = imageLoad(radiance_cache_depth, rc_texel_base(c, slot) + vt).rg;
+					float variance = max(m.y - m.x * m.x, 1e-3);
+					float over = max(d - m.x, 0.0);
+					float cheb = variance / (variance + over * over);
+					w *= over > 0.0 ? cheb * cheb * cheb : 1.0;
+				}
+			}
 			sum += imageLoad(radiance_cache, rc_texel_base(c, slot) + oct).rgb * w;
 			wsum += w;
 		}
@@ -569,6 +583,15 @@ void main() {
 			// Sample point pushed half a probe cell along the normal so grazing rays favor probes above the surface.
 			if (rc_sample(origin + dir * max_dist + normal * rc_spacing(0) * 0.5, dir, normal, rc)) {
 				radiance = rc;
+			} else if (sdf_trace(origin + dir * max_dist, dir, 100.0 - max_dist, hit, cascade)) {
+				// No usable probe there: finish the ray instead of assuming sky.
+				hits++;
+				vec3 hn = sdf_normal(hit, cascade);
+				if (sample_cards(hit, hn, 1.5 / sdf.cascades[cascade].w, radiance)) {
+					found++;
+				} else {
+					radiance = vec3(0.0);
+				}
 			}
 		}
 		sum += radiance;
@@ -617,16 +640,23 @@ void main() {
 		vec3 radiance = sky_radiance(dir);
 		vec3 hit;
 		int cascade;
+		float hit_dist = 200.0;
 		if (sdf_trace(pos, dir, 200.0, hit, cascade)) {
 			vec3 hn = sdf_normal(hit, cascade);
 			float cell_size = 1.0 / sdf.cascades[cascade].w;
 			if (!sample_cards(hit, hn, 1.5 * cell_size, radiance)) {
 				radiance = vec3(0.0);
 			}
+			hit_dist = length(hit - pos);
 		}
 		ivec2 at = rc_texel_base(c, slot) + texel;
 		vec3 prev = imageLoad(radiance_cache, at).rgb;
 		imageStore(radiance_cache, at, vec4(fresh ? radiance : mix(prev, radiance, 0.25), 1.0));
+		// Depth for the visibility test is clamped to a few cells so that misses do not swamp the variance.
+		hit_dist = min(hit_dist, spacing * 3.0);
+		vec2 prev_m = imageLoad(radiance_cache_depth, at).rg;
+		vec2 m = vec2(hit_dist, hit_dist * hit_dist);
+		imageStore(radiance_cache_depth, at, vec4(fresh ? m : mix(prev_m, m, 0.25), 0.0, 1.0));
 	}
 	barrier();
 	if (gl_LocalInvocationIndex == 0u) {
@@ -691,6 +721,8 @@ void main() {
 		vec3 rc;
 		if (rc_sample(origin + dir * sdf.rc_params.y + normal * rc_spacing(0) * 0.5, dir, normal, rc)) {
 			radiance = rc;
+		} else {
+			hit_any = sdf_trace(origin + dir * sdf.rc_params.y, dir, 200.0 - sdf.rc_params.y, hit, cascade);
 		}
 	}
 	if (hit_any && !found) {
@@ -886,6 +918,9 @@ void main() {
 			if (rc_sample(origin + dir * max_dist + normal * rc_spacing(0) * 0.5, dir, normal, rc)) {
 				radiance = rc;
 				rc_ok = true;
+			} else {
+				// No usable probe there: finish the ray instead of assuming sky.
+				traced = sdf_trace(origin + dir * max_dist, dir, 100.0 - max_dist, hit, cascade);
 			}
 		}
 		if (push.debug == 4u && !traced) {

@@ -136,6 +136,7 @@ private:
 	RID reflection_history[2];
 	RID radiance_cache_texture;
 	RID radiance_meta_buffer;
+	RID radiance_cache_depth;
 	bool radiance_cache_enabled = false;
 	void _ensure_radiance_cache();
 	static const uint32_t RADIANCE_PROBES = 16;
