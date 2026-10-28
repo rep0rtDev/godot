@@ -103,6 +103,15 @@ func _init() -> void:
 		floor_mi.mesh = floor_mesh
 		floor_mi.position = Vector3(0, -3, 0)
 		root.add_child(floor_mi)
+	if arg("spot", "0") == "1":
+		var spot := SpotLight3D.new()
+		spot.position = Vector3(5, 10, -5)
+		spot.rotation_degrees = Vector3(-90, 0, 0)
+		spot.spot_range = 40
+		spot.spot_angle = 50
+		spot.light_energy = 8
+		spot.shadow_enabled = true
+		root.add_child(spot)
 	var side := int(ceil(sqrt(count)))
 	for i in count:
 		var mi := MeshInstance3D.new()

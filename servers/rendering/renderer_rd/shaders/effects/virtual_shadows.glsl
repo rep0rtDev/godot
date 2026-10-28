@@ -23,7 +23,7 @@ layout(set = 0, binding = 1, std140) uniform Params {
 	mat4 inv_view;
 	mat4 light_view;
 	vec4 params; // base extent, levels, projection[1][1], viewport height
-	ivec4 size;
+	ivec4 size; // width, height, spot count, directional valid
 }
 params;
 
@@ -31,6 +31,21 @@ layout(set = 0, binding = 2, std430) restrict buffer Requests {
 	uint data[];
 }
 requests;
+
+struct SpotParams {
+	mat4 clip_from_world;
+	vec4 position_range;
+	vec4 info; // first level, mips, tan(half fov), unused
+};
+
+layout(set = 0, binding = 3, std430) restrict readonly buffer Spots {
+	SpotParams data[];
+}
+spots;
+
+void request(uint entry) {
+	atomicOr(requests.data[entry >> 5], 1u << (entry & 31u));
+}
 
 void main() {
 	ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
@@ -46,12 +61,32 @@ void main() {
 	view.xyz /= view.w;
 	vec3 world = (params.inv_view * vec4(view.xyz, 1.0)).xyz;
 	float footprint = -view.z * 2.0 / (params.params.z * params.params.w);
-	int level = clamp(int(ceil(log2(footprint * float(PAGES * TEXELS) / params.params.x))), 0, int(params.params.y) - 1);
-	vec2 lp = (params.light_view * vec4(world, 1.0)).xy;
-	float page_size = params.params.x * float(1 << level) / float(PAGES);
-	ivec2 page = ivec2(floor(lp / page_size)) & (PAGES - 1);
-	uint entry = uint(level) * uint(PAGES * PAGES) + uint(page.y) * uint(PAGES) + uint(page.x);
-	atomicOr(requests.data[entry >> 5], 1u << (entry & 31u));
+	if (params.size.w != 0) {
+		int level = clamp(int(ceil(log2(footprint * float(PAGES * TEXELS) / params.params.x))), 0, int(params.params.y) - 1);
+		vec2 lp = (params.light_view * vec4(world, 1.0)).xy;
+		float page_size = params.params.x * float(1 << level) / float(PAGES);
+		ivec2 page = ivec2(floor(lp / page_size)) & (PAGES - 1);
+		request(uint(level) * uint(PAGES * PAGES) + uint(page.y) * uint(PAGES) + uint(page.x));
+	}
+	for (int s = 0; s < params.size.z; s++) {
+		vec4 clip = spots.data[s].clip_from_world * vec4(world, 1.0);
+		if (clip.w <= 0.0) {
+			continue;
+		}
+		vec2 ndc = clip.xy / clip.w;
+		if (any(greaterThan(abs(ndc), vec2(1.0)))) {
+			continue;
+		}
+		float dist = distance(world, spots.data[s].position_range.xyz);
+		if (dist > spots.data[s].position_range.w) {
+			continue;
+		}
+		int mips = int(spots.data[s].info.y);
+		int mip = clamp(int(ceil(log2(footprint * float(PAGES * TEXELS) / (2.0 * dist * spots.data[s].info.z)))), 0, mips - 1);
+		int pages = PAGES >> mip;
+		ivec2 page = clamp(ivec2((ndc * 0.5 + 0.5) * float(pages)), ivec2(0), ivec2(pages - 1));
+		request((uint(spots.data[s].info.x) + uint(mip)) * uint(PAGES * PAGES) + uint(page.y) * uint(PAGES) + uint(page.x));
+	}
 }
 
 #endif

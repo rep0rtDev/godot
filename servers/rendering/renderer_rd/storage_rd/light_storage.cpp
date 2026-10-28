@@ -728,6 +728,11 @@ void LightStorage::set_max_lights(const uint32_t p_max_lights) {
 }
 
 void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const PagedArray<RID> &p_lights, const Transform3D &p_camera_transform, RID p_shadow_atlas, bool p_using_shadows, uint32_t &r_directional_light_count, uint32_t &r_positional_light_count, bool &r_directional_light_soft_shadows) {
+	// Pixel footprint scale for virtual shadow mip selection: projection[1][1] * viewport height.
+	float vsm_pixel_scale = 1.0f;
+	if (p_render_data && p_render_data->scene_data && p_render_data->render_buffers.is_valid()) {
+		vsm_pixel_scale = p_render_data->scene_data->cam_projection.columns[1][1] * p_render_data->render_buffers->get_internal_size().height;
+	}
 	ForwardIDStorage *forward_id_storage = ForwardIDStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
@@ -823,6 +828,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					RSE::LightDirectionalShadowMode smode = light->directional_shadow_mode;
 
 					light_data.soft_shadow_scale = light->param[RSE::LIGHT_PARAM_SHADOW_BLUR];
+					light_data.vsm_info[0] = 0;
 					light_data.softshadow_angle = angular_diameter;
 
 					if (angular_diameter <= 0.0) {
@@ -831,7 +837,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 					int limit = smode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL ? 0 : (smode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 1 : 3);
 					light_data.blend_splits = (smode != RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL) && light->directional_blend_splits;
-					VirtualShadowsEffect::get_singleton()->fill_light_data(light_instance->self, p_using_shadows && light->shadow, light_data.vsm_light_view, light_data.vsm_depth_row, light_data.vsm_params, light_data.vsm_info);
+					VirtualShadowsEffect::get_singleton()->fill_directional_light_data(light_instance->self, p_using_shadows && light->shadow, light_data.vsm_light_view, light_data.vsm_depth_row, light_data.vsm_params, light_data.vsm_info);
 					for (int j = 0; j < 4; j++) {
 						Rect2 atlas_rect = light_instance->shadow_transform[j].atlas_rect;
 						Projection correction;
@@ -1126,6 +1132,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		light_data.atlas_rect[1] = 0;
 		light_data.atlas_rect[2] = 0;
 		light_data.atlas_rect[3] = 0;
+		light_data.vsm_info[0] = 0;
 
 		RID projector = light->projector;
 
@@ -1200,6 +1207,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			light_data.atlas_rect[3] = rect.size.height;
 
 			light_data.soft_shadow_scale = light->param[RSE::LIGHT_PARAM_SHADOW_BLUR];
+			light_data.vsm_info[0] = 0;
 
 			if (type == RSE::LIGHT_OMNI) {
 				Transform3D proj = (inverse_transform * light_transform).inverse();
@@ -1240,6 +1248,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				Projection cm = correction * light_instance->shadow_transform[0].camera;
 				Projection shadow_mtx = bias * cm * modelview;
 				RendererRD::MaterialStorage::store_camera(shadow_mtx, light_data.shadow_matrix);
+				VirtualShadowsEffect::get_singleton()->fill_spot_light_data(light_instance->self, true, inverse_transform, light_transform, vsm_pixel_scale, light_data.vsm_matrix, light_data.vsm_params, light_data.vsm_info);
 
 				if (size > 0.0 && light_data.soft_shadow_scale > 0.0) {
 					// Only enable PCSS-like soft shadows if blurring is enabled.

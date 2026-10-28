@@ -3657,6 +3657,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 
 			bool redraw = RSG::light_storage->shadow_atlas_update_light(p_shadow_atlas, light->instance, coverage, light->last_version);
+			// Virtual shadow pages of spot lights are requested every frame, so their pass has to run every frame.
+			static const bool virtual_shadows_spots = GLOBAL_GET("rendering/virtual_shadows/enabled");
+			if (virtual_shadows_spots && RSG::light_storage->light_get_type(ins->base) == RSE::LIGHT_SPOT) {
+				redraw = true;
+			}
 
 			if (redraw && max_shadows_used < MAX_UPDATE_SHADOWS) {
 				//must redraw!

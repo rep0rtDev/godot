@@ -33,6 +33,9 @@ struct LightData { //this structure needs to be as packed as possible
 	float volumetric_fog_energy;
 	uint bake_mode;
 	vec4 projector_rect; //projector rect in srgb decal atlas
+	mat4 vsm_matrix; // view space to the virtual shadow map clip space
+	vec4 vsm_params; // tan(half fov), mips, normal bias, unused
+	uvec4 vsm_info; // enabled, first page table entry, pool columns, page key
 };
 
 #define REFLECTION_AMBIENT_DISABLED 0

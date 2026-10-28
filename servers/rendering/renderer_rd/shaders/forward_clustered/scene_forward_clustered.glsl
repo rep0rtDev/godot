@@ -1259,6 +1259,7 @@ layout(location = 2) out vec2 motion_vector;
 #endif
 
 #include "../scene_forward_gi_inc.glsl"
+#define VIRTUAL_SHADOWS
 #include "../scene_forward_lights_inc.glsl"
 
 #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)

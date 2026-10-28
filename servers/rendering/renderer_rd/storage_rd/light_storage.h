@@ -167,6 +167,9 @@ private:
 		float volumetric_fog_energy;
 		uint32_t bake_mode;
 		float projector_rect[4];
+		float vsm_matrix[16];
+		float vsm_params[4];
+		uint32_t vsm_info[4];
 	};
 
 	struct LightInstanceDepthSort {

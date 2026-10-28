@@ -798,7 +798,7 @@ private:
 	RendererRD::MotionVectorsStore *motion_vectors_store = nullptr;
 	RendererRD::VirtualGeometryEffect *virtual_geometry = nullptr;
 	RendererRD::VirtualShadowsEffect *virtual_shadows = nullptr;
-	HashMap<const void *, AABB> vsm_casters; // Casters in the directional shadow set last frame, by their bounds then.
+	HashMap<RID, HashMap<const void *, AABB>> vsm_casters; // Per light: casters in its shadow set last frame, by their bounds then.
 	PagedArrayPool<RenderGeometryInstance *> vsm_instance_pool;
 	PagedArray<RenderGeometryInstance *> vsm_window_instances;
 	bool vsm_instance_pool_ready = false;

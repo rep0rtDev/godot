@@ -3029,16 +3029,18 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 	} else {
 		//render shadow
 		bool virtual_shadow = false;
-		if (virtual_shadows->is_enabled() && light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL && p_pass == 0) {
-			// Virtual shadow pages: windows of the clipmap rendered into the scratch target, copied after _render_shadow_end().
+		const RSE::LightType vsm_type = light_storage->light_get_type(base);
+		if (virtual_shadows->is_enabled() && (vsm_type == RSE::LIGHT_DIRECTIONAL || vsm_type == RSE::LIGHT_SPOT) && p_pass == 0) {
+			// Virtual shadow pages: windows rendered into the scratch target, copied after _render_shadow_end().
 			// Casters that moved, entered or left the shadow set invalidate the pages under their old and new bounds.
 			const uint64_t frame = RSG::rasterizer->get_frame_number();
 			LocalVector<AABB> invalidate;
 			HashMap<const void *, AABB> casters;
+			HashMap<const void *, AABB> &prev_casters = vsm_casters[p_light];
 			for (int i = 0; i < int(p_instances.size()); i++) {
 				const GeometryInstanceForwardClustered *gi = static_cast<const GeometryInstanceForwardClustered *>(p_instances[i]);
 				casters.insert(gi, gi->transformed_aabb);
-				const AABB *prev = vsm_casters.getptr(gi);
+				const AABB *prev = prev_casters.getptr(gi);
 				const bool moved = gi->prev_transform_change_frame != 0xFFFFFFFF && gi->prev_transform_change_frame + 1 >= frame;
 				if (!prev || moved) {
 					invalidate.push_back(gi->transformed_aabb);
@@ -3047,28 +3049,29 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 					invalidate.push_back(*prev);
 				}
 			}
-			for (const KeyValue<const void *, AABB> &kv : vsm_casters) {
+			for (const KeyValue<const void *, AABB> &kv : prev_casters) {
 				if (!casters.has(kv.key)) {
 					invalidate.push_back(kv.value);
 				}
 			}
-			vsm_casters = casters;
-			if (virtual_shadows->plan_light(p_light, light_transform, light_projection.get_z_far(), light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS), invalidate)) {
+			prev_casters = casters;
+			if (virtual_shadows->plan_light(p_light, vsm_type == RSE::LIGHT_DIRECTIONAL, light_transform, light_projection, light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS), invalidate)) {
 				virtual_shadow = true;
 				if (!vsm_instance_pool_ready) {
 					vsm_instance_pool_ready = true;
 					vsm_instance_pool.configure(1024);
 					vsm_window_instances.set_page_pool(&vsm_instance_pool);
 				}
-				for (const RendererRD::VirtualShadowsEffect::Window &win : virtual_shadows->get_windows()) {
-					const Rect2 window_rect = virtual_shadows->get_window_light_rect(win);
+				LocalVector<const RendererRD::VirtualShadowsEffect::Window *> light_windows;
+				virtual_shadows->get_windows(p_light, light_windows);
+				for (const RendererRD::VirtualShadowsEffect::Window *win : light_windows) {
 					vsm_window_instances.clear();
 					for (int i = 0; i < int(p_instances.size()); i++) {
-						if (window_rect.intersects(virtual_shadows->get_light_rect(static_cast<const GeometryInstanceForwardClustered *>(p_instances[i])->transformed_aabb))) {
+						if (virtual_shadows->window_touches(*win, static_cast<const GeometryInstanceForwardClustered *>(p_instances[i])->transformed_aabb)) {
 							vsm_window_instances.push_back(p_instances[i]);
 						}
 					}
-					_render_shadow_append(virtual_shadows->get_scratch_framebuffer(), vsm_window_instances, virtual_shadows->get_window_projection(win), virtual_shadows->get_window_transform(win), zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, win.rect, true, true, false, false, p_render_info, p_viewport_size, p_main_cam_transform);
+					_render_shadow_append(virtual_shadows->get_scratch_framebuffer(), vsm_window_instances, virtual_shadows->get_window_projection(*win), virtual_shadows->get_window_transform(*win), zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, win->rect, true, true, false, false, p_render_info, p_viewport_size, p_main_cam_transform);
 				}
 			}
 		}

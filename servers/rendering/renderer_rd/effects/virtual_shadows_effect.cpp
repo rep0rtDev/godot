@@ -34,7 +34,6 @@
 #include "core/io/image.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
-#include "core/templates/hash_map.h"
 #include "core/templates/pair.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -46,6 +45,21 @@
 using namespace RendererRD;
 
 VirtualShadowsEffect *VirtualShadowsEffect::singleton = nullptr;
+
+namespace {
+struct MarkParams {
+	float inv_projection[16];
+	float inv_view[16];
+	float light_view[16];
+	float params[4]; // base extent, levels, projection[1][1], viewport height
+	int32_t size[4]; // width, height, spot count, directional valid
+};
+struct SpotParams {
+	float clip_from_world[16];
+	float position_range[4];
+	float info[4]; // first level, mips, tan(half fov), unused
+};
+} // namespace
 
 VirtualShadowsEffect::VirtualShadowsEffect() {
 	singleton = this;
@@ -98,7 +112,8 @@ VirtualShadowsEffect::VirtualShadowsEffect() {
 	request_buffer = RD::get_singleton()->storage_buffer_create(ENTRIES / 32 * sizeof(uint32_t));
 	RD::get_singleton()->buffer_clear(request_buffer, 0, ENTRIES / 32 * sizeof(uint32_t));
 	copy_buffer = RD::get_singleton()->storage_buffer_create(uint64_t(windows_per_frame) * WINDOW_PAGES * WINDOW_PAGES * 4 * sizeof(uint32_t));
-	mark_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (16 * 3 + 4 + 4));
+	mark_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(MarkParams));
+	spot_params_buffer = RD::get_singleton()->storage_buffer_create(sizeof(SpotParams) * SPOT_SLOTS);
 	phys_entry.resize(pool_pages);
 	phys_entry.fill(UINT32_MAX);
 	phys_last_used.resize_initialized(pool_pages);
@@ -109,7 +124,7 @@ VirtualShadowsEffect::VirtualShadowsEffect() {
 }
 
 VirtualShadowsEffect::~VirtualShadowsEffect() {
-	for (RID rid : { pool_texture, scratch_fb, scratch_depth, page_table_buffer, request_buffer, copy_buffer, mark_params_buffer }) {
+	for (RID rid : { pool_texture, scratch_fb, scratch_depth, page_table_buffer, request_buffer, copy_buffer, mark_params_buffer, spot_params_buffer }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -125,6 +140,14 @@ void VirtualShadowsEffect::begin_frame(uint64_t p_frame) {
 	windows.clear();
 	copies.clear();
 	stats = Stats();
+	requests_ready = have_requests;
+	have_requests = false;
+	// Spot lights that stopped casting shadows give their slot back.
+	for (uint32_t s = 1; s <= SPOT_SLOTS; s++) {
+		if (slots[s].valid && slots[s].last_seen + 60 < frame) {
+			_free_slot(s);
+		}
+	}
 }
 
 void VirtualShadowsEffect::_requests_received(const Vector<uint8_t> &p_data) {
@@ -143,29 +166,51 @@ void VirtualShadowsEffect::_requests_received(const Vector<uint8_t> &p_data) {
 }
 
 void VirtualShadowsEffect::mark(RID p_depth, const RenderSceneDataRD &p_scene_data, const Size2i &p_size) {
-	if (!enabled || !light_valid) {
+	if (!enabled) {
 		return;
 	}
-	struct Params {
-		float inv_projection[16];
-		float inv_view[16];
-		float light_view[16];
-		float params[4];
-		int32_t size[4];
-	} params;
+	MarkParams params;
 	Projection correction;
 	correction.set_depth_correction(p_scene_data.flip_y);
 	MaterialStorage::store_camera((correction * p_scene_data.cam_projection).inverse(), params.inv_projection);
 	MaterialStorage::store_transform(p_scene_data.cam_transform, params.inv_view);
-	MaterialStorage::store_transform(Transform3D(basis, Vector3()).affine_inverse(), params.light_view);
+	MaterialStorage::store_transform(Transform3D(slots[0].basis, Vector3()).affine_inverse(), params.light_view);
 	params.params[0] = base_extent;
 	params.params[1] = LEVELS;
 	params.params[2] = p_scene_data.cam_projection.columns[1][1];
 	params.params[3] = p_size.height;
 	params.size[0] = p_size.width;
 	params.size[1] = p_size.height;
-	params.size[2] = params.size[3] = 0;
-	RD::get_singleton()->buffer_update(mark_params_buffer, 0, sizeof(Params), &params);
+	params.size[3] = slots[0].valid ? 1 : 0;
+
+	SpotParams spots[SPOT_SLOTS];
+	uint32_t spot_count = 0;
+	Projection spot_correction;
+	spot_correction.set_depth_correction(false);
+	for (uint32_t s = 1; s <= SPOT_SLOTS; s++) {
+		const Slot &slot = slots[s];
+		if (!slot.valid) {
+			continue;
+		}
+		SpotParams &sp = spots[spot_count++];
+		MaterialStorage::store_camera(spot_correction * slot.projection * Projection(slot.transform.affine_inverse()), sp.clip_from_world);
+		sp.position_range[0] = slot.transform.origin.x;
+		sp.position_range[1] = slot.transform.origin.y;
+		sp.position_range[2] = slot.transform.origin.z;
+		sp.position_range[3] = slot.projection.get_z_far();
+		sp.info[0] = _slot_level(s, 0);
+		sp.info[1] = SPOT_MIPS;
+		sp.info[2] = slot.projection.get_viewport_half_extents().x / slot.projection.get_z_near();
+		sp.info[3] = 0;
+	}
+	params.size[2] = spot_count;
+	if (spot_count) {
+		RD::get_singleton()->buffer_update(spot_params_buffer, 0, sizeof(SpotParams) * spot_count, spots);
+	}
+	if (!params.size[3] && !spot_count) {
+		return;
+	}
+	RD::get_singleton()->buffer_update(mark_params_buffer, 0, sizeof(MarkParams), &params);
 
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	RID sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
@@ -173,7 +218,8 @@ void VirtualShadowsEffect::mark(RID p_depth, const RenderSceneDataRD &p_scene_da
 	RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { sampler, p_depth });
 	RD::Uniform u_params(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 1, mark_params_buffer);
 	RD::Uniform u_requests(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, request_buffer);
-	RID set = UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 0, u_depth, u_params, u_requests);
+	RD::Uniform u_spots(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, spot_params_buffer);
+	RID set = UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 0, u_depth, u_params, u_requests, u_spots);
 
 	// Read back what the previous frame marked, then clear and mark again.
 	if (!requests_pending && marked_once) {
@@ -206,10 +252,17 @@ void VirtualShadowsEffect::_free_entry(uint32_t p_entry) {
 	level_dirty[p_entry / ENTRIES_PER_LEVEL] = true;
 }
 
-void VirtualShadowsEffect::_invalidate_all() {
-	for (uint32_t i = 0; i < ENTRIES; i++) {
-		_free_entry(i);
+void VirtualShadowsEffect::_free_slot(uint32_t p_slot) {
+	const uint32_t levels = p_slot == 0 ? LEVELS : SPOT_MIPS;
+	for (uint32_t l = 0; l < levels; l++) {
+		const uint32_t first = _slot_level(p_slot, l) * ENTRIES_PER_LEVEL;
+		for (uint32_t e = first; e < first + ENTRIES_PER_LEVEL; e++) {
+			_free_entry(e);
+		}
 	}
+	slots[p_slot].valid = false;
+	slots[p_slot].light = RID();
+	slots[p_slot].version++;
 }
 
 int32_t VirtualShadowsEffect::_alloc_page() {
@@ -235,102 +288,179 @@ int32_t VirtualShadowsEffect::_alloc_page() {
 	return victim;
 }
 
-bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p_cascade_transform, float p_cascade_zfar, float p_normal_bias, const LocalVector<AABB> &p_invalidate) {
-	if (!enabled) {
-		return false;
+int32_t VirtualShadowsEffect::_slot_of(RID p_light) const {
+	for (uint32_t s = 0; s <= SPOT_SLOTS; s++) {
+		if (slots[s].valid && slots[s].light == p_light) {
+			return s;
+		}
 	}
-	if (light.is_null() || !light_valid) {
-		light = p_light_instance;
-	}
-	if (light != p_light_instance) {
-		return false;
-	}
-	normal_bias = p_normal_bias;
+	return -1;
+}
 
+void VirtualShadowsEffect::_plan_directional(Slot &p_slot, uint32_t p_slot_index, const Transform3D &p_cascade_transform, float p_cascade_zfar) {
 	// Light frame: the cascade basis, world anchored. Depth range: a snapped window around what the cascade needs, so
 	// that cached pages stay comparable while the camera moves.
 	const Basis new_basis = p_cascade_transform.basis;
-	bool reset = !light_valid;
+	bool reset = !p_slot.valid;
 	for (int i = 0; i < 3 && !reset; i++) {
-		reset = !new_basis.get_column(i).is_equal_approx(basis.get_column(i));
+		reset = !new_basis.get_column(i).is_equal_approx(p_slot.basis.get_column(i));
 	}
 	const float z_max = new_basis.get_column(2).dot(p_cascade_transform.origin);
 	const float z_min = z_max - p_cascade_zfar;
 	const float snap = 128.0f;
-	if (reset || z_max > z_origin || z_min < z_origin - z_range) {
-		basis = new_basis;
-		z_origin = Math::ceil(z_max / snap) * snap + snap;
-		z_range = Math::ceil((z_origin - z_min) / snap) * snap + snap;
-		_invalidate_all();
-		light_valid = true;
+	if (reset || z_max > p_slot.z_origin || z_min < p_slot.z_origin - p_slot.z_range) {
+		_free_slot(p_slot_index);
+		p_slot.basis = new_basis;
+		p_slot.z_origin = Math::ceil(z_max / snap) * snap + snap;
+		p_slot.z_range = Math::ceil((p_slot.z_origin - z_min) / snap) * snap + snap;
 	}
+	p_slot.transform = p_cascade_transform;
+}
 
-	// Casters that moved, appeared or disappeared: every page their bounds touch is rendered again.
+void VirtualShadowsEffect::_plan_spot(Slot &p_slot, const Transform3D &p_transform, const Projection &p_projection) {
+	bool reset = !p_slot.valid || !p_slot.transform.is_equal_approx(p_transform);
+	for (int c = 0; c < 4 && !reset; c++) {
+		reset = !p_slot.projection.columns[c].is_equal_approx(p_projection.columns[c]);
+	}
+	if (reset) {
+		const uint32_t s = &p_slot - slots;
+		_free_slot(s);
+		p_slot.transform = p_transform;
+		p_slot.projection = p_projection;
+	}
+}
+
+Rect2 VirtualShadowsEffect::_spot_ndc_rect(const Slot &p_slot, const AABB &p_aabb, bool &r_all) const {
+	// NDC bounds of the caster; r_all when a corner is behind the light plane (then the caster can be anywhere).
+	Projection clip = p_slot.projection * Projection(p_slot.transform.affine_inverse());
+	Vector2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
+	r_all = false;
+	for (int c = 0; c < 8; c++) {
+		const Vector3 e = p_aabb.get_endpoint(c);
+		const Vector4 h = clip.xform(Vector4(e.x, e.y, e.z, 1.0));
+		if (h.w <= 0.0001f) {
+			r_all = true;
+			return Rect2(-1, -1, 2, 2);
+		}
+		const Vector2 n(h.x / h.w, h.y / h.w);
+		lo = lo.min(n);
+		hi = hi.max(n);
+	}
+	return Rect2(lo, hi - lo);
+}
+
+void VirtualShadowsEffect::_invalidate(uint32_t p_slot, const LocalVector<AABB> &p_invalidate) {
+	Slot &slot = slots[p_slot];
 	for (const AABB &aabb : p_invalidate) {
-		const Rect2 r = get_light_rect(aabb);
-		const Vector2 lo = r.position, hi = r.get_end();
-		for (uint32_t level = 0; level < LEVELS; level++) {
-			const float ps = _page_size(level);
-			const int64_t x0 = int64_t(Math::floor(lo.x / ps)), x1 = int64_t(Math::floor(hi.x / ps));
-			const int64_t y0 = int64_t(Math::floor(lo.y / ps)), y1 = int64_t(Math::floor(hi.y / ps));
-			if ((x1 - x0 + 1) * (y1 - y0 + 1) >= ENTRIES_PER_LEVEL) {
-				for (uint32_t e = level * ENTRIES_PER_LEVEL; e < (level + 1) * ENTRIES_PER_LEVEL; e++) {
-					_free_entry(e);
-				}
-				continue;
+		if (p_slot == 0) {
+			Vector2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
+			for (int c = 0; c < 8; c++) {
+				const Vector2 l = _light_xy(slot, aabb.get_endpoint(c));
+				lo = lo.min(l);
+				hi = hi.max(l);
 			}
-			for (int64_t y = y0; y <= y1; y++) {
-				for (int64_t x = x0; x <= x1; x++) {
-					const uint32_t e = level * ENTRIES_PER_LEVEL + uint32_t(y & (PAGES - 1)) * PAGES + uint32_t(x & (PAGES - 1));
-					if (entry_valid[e] && entry_key[e] == _key(int32_t(x), int32_t(y))) {
+			for (uint32_t level = 0; level < LEVELS; level++) {
+				const float ps = _page_size(level);
+				const int64_t x0 = int64_t(Math::floor(lo.x / ps)), x1 = int64_t(Math::floor(hi.x / ps));
+				const int64_t y0 = int64_t(Math::floor(lo.y / ps)), y1 = int64_t(Math::floor(hi.y / ps));
+				const uint32_t base = _slot_level(0, level) * ENTRIES_PER_LEVEL;
+				if ((x1 - x0 + 1) * (y1 - y0 + 1) >= ENTRIES_PER_LEVEL) {
+					for (uint32_t e = base; e < base + ENTRIES_PER_LEVEL; e++) {
 						_free_entry(e);
+					}
+					continue;
+				}
+				for (int64_t y = y0; y <= y1; y++) {
+					for (int64_t x = x0; x <= x1; x++) {
+						const uint32_t e = base + uint32_t(y & (PAGES - 1)) * PAGES + uint32_t(x & (PAGES - 1));
+						if (entry_valid[e] && entry_key[e] == _key(int32_t(x), int32_t(y))) {
+							_free_entry(e);
+						}
+					}
+				}
+			}
+		} else {
+			bool all = false;
+			const Rect2 ndc = _spot_ndc_rect(slot, aabb, all);
+			for (uint32_t mip = 0; mip < SPOT_MIPS; mip++) {
+				const int32_t pages = PAGES >> mip;
+				const uint32_t base = _slot_level(p_slot, mip) * ENTRIES_PER_LEVEL;
+				int32_t x0 = 0, x1 = pages - 1, y0 = 0, y1 = pages - 1;
+				if (!all) {
+					x0 = CLAMP(int32_t(Math::floor((ndc.position.x * 0.5f + 0.5f) * pages)), 0, pages - 1);
+					x1 = CLAMP(int32_t(Math::floor((ndc.get_end().x * 0.5f + 0.5f) * pages)), 0, pages - 1);
+					y0 = CLAMP(int32_t(Math::floor((ndc.position.y * 0.5f + 0.5f) * pages)), 0, pages - 1);
+					y1 = CLAMP(int32_t(Math::floor((ndc.get_end().y * 0.5f + 0.5f) * pages)), 0, pages - 1);
+					if (ndc.get_end().x < -1 || ndc.position.x > 1 || ndc.get_end().y < -1 || ndc.position.y > 1) {
+						continue;
+					}
+				}
+				for (int32_t y = y0; y <= y1; y++) {
+					for (int32_t x = x0; x <= x1; x++) {
+						_free_entry(base + uint32_t(y) * PAGES + uint32_t(x));
 					}
 				}
 			}
 		}
 	}
+}
 
-	if (!have_requests) {
-		return true;
+void VirtualShadowsEffect::_plan_windows(uint32_t p_slot) {
+	if (!requests_ready) {
+		return;
 	}
-
-	// Requested pages: absolute coordinates come from unwrapping around the camera position at marking time.
+	Slot &slot = slots[p_slot];
+	// Requested pages of this slot. Directional pages get absolute coordinates by unwrapping around the camera position
+	// at marking time; spot pages are keyed by the slot version.
 	struct Need {
 		uint32_t entry;
 		uint32_t level;
 		int32_t x, y;
+		uint32_t key;
 	};
 	LocalVector<Need> needs;
-	const Vector2 cam = _light_xy(request_camera);
-	for (uint32_t w = 0; w < uint32_t(requests.size()); w++) {
-		uint32_t bits = requests[w];
-		while (bits) {
-			const uint32_t b = __builtin_ctz(bits);
-			bits &= bits - 1;
-			const uint32_t e = w * 32 + b;
-			const uint32_t level = e / ENTRIES_PER_LEVEL;
-			const uint32_t wrapped_x = e % PAGES, wrapped_y = (e / PAGES) % PAGES;
-			const float ps = _page_size(level);
-			const int32_t ox = int32_t(Math::floor(cam.x / ps)) - PAGES / 2, oy = int32_t(Math::floor(cam.y / ps)) - PAGES / 2;
-			const int32_t x = ox + ((int32_t(wrapped_x) - ox) & (PAGES - 1));
-			const int32_t y = oy + ((int32_t(wrapped_y) - oy) & (PAGES - 1));
-			stats.requested++;
-			if (entry_valid[e] && entry_key[e] == _key(x, y)) {
-				phys_last_used.write[table[e * 2] >> 1] = frame;
-			} else {
-				needs.push_back({ e, level, x, y });
+	const uint32_t levels = p_slot == 0 ? LEVELS : SPOT_MIPS;
+	const Vector2 cam = p_slot == 0 ? _light_xy(slot, request_camera) : Vector2();
+	for (uint32_t level = 0; level < levels; level++) {
+		const uint32_t first_word = _slot_level(p_slot, level) * ENTRIES_PER_LEVEL / 32;
+		for (uint32_t w = first_word; w < first_word + ENTRIES_PER_LEVEL / 32; w++) {
+			uint32_t bits = requests[w];
+			while (bits) {
+				const uint32_t b = __builtin_ctz(bits);
+				bits &= bits - 1;
+				const uint32_t e = w * 32 + b;
+				const uint32_t wrapped_x = e % PAGES, wrapped_y = (e / PAGES) % PAGES;
+				int32_t x = wrapped_x, y = wrapped_y;
+				uint32_t key = slot.version;
+				if (p_slot == 0) {
+					const float ps = _page_size(level);
+					const int32_t ox = int32_t(Math::floor(cam.x / ps)) - PAGES / 2, oy = int32_t(Math::floor(cam.y / ps)) - PAGES / 2;
+					x = ox + ((int32_t(wrapped_x) - ox) & (PAGES - 1));
+					y = oy + ((int32_t(wrapped_y) - oy) & (PAGES - 1));
+					key = _key(x, y);
+				} else if (x >= (PAGES >> level) || y >= (PAGES >> level)) {
+					continue;
+				}
+				stats.requested++;
+				if (entry_valid[e] && entry_key[e] == key) {
+					phys_last_used.write[table[e * 2] >> 1] = frame;
+				} else {
+					needs.push_back({ e, level, x, y, key });
+				}
 			}
 		}
 	}
-	stats.missing = needs.size();
+	stats.missing += needs.size();
 
-	// Windows with the most missing pages first.
+	// Windows with the most missing pages first, within the shared frame budget.
 	HashMap<uint64_t, uint32_t> window_count;
+	auto window_key = [](const Need &n) {
+		return (uint64_t(n.level) << 48) | (uint64_t(uint32_t(n.x >> 3) & 0xFFFF) << 16) | (uint32_t(n.y >> 3) & 0xFFFF);
+	};
 	for (const Need &n : needs) {
-		const uint64_t k = (uint64_t(n.level) << 48) | (uint64_t(uint32_t(n.x >> 3)) << 16) | uint32_t(n.y >> 3) & 0xFFFF;
-		window_count[k]++;
+		window_count[window_key(n)]++;
 	}
-	stats.windows_needed = window_count.size();
+	stats.windows_needed += window_count.size();
 	LocalVector<Pair<uint32_t, uint64_t>> order;
 	for (const KeyValue<uint64_t, uint32_t> &kv : window_count) {
 		order.push_back(Pair<uint32_t, uint64_t>(kv.value, kv.key));
@@ -339,18 +469,18 @@ bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p
 	HashMap<uint64_t, uint32_t> window_index;
 	for (int64_t i = int64_t(order.size()) - 1; i >= 0 && windows.size() < windows_per_frame; i--) {
 		Window win;
+		win.slot = p_slot;
 		win.level = uint32_t(order[i].second >> 48);
 		win.wx = int32_t(int16_t((order[i].second >> 16) & 0xFFFF));
 		win.wy = int32_t(int16_t(order[i].second & 0xFFFF));
-		const uint32_t slot = windows.size();
-		win.rect = Rect2i((slot % scratch_cols) * WINDOW_TEXELS, (slot / scratch_cols) * WINDOW_TEXELS, WINDOW_TEXELS, WINDOW_TEXELS);
-		window_index[order[i].second] = slot;
+		const uint32_t index = windows.size();
+		win.rect = Rect2i((index % scratch_cols) * WINDOW_TEXELS, (index / scratch_cols) * WINDOW_TEXELS, WINDOW_TEXELS, WINDOW_TEXELS);
+		window_index[order[i].second] = index;
 		windows.push_back(win);
 	}
 	for (const Need &n : needs) {
-		const uint64_t k = (uint64_t(n.level) << 48) | (uint64_t(uint32_t(n.x >> 3)) << 16) | uint32_t(n.y >> 3) & 0xFFFF;
-		const uint32_t *slot = window_index.getptr(k);
-		if (!slot) {
+		const uint32_t *index = window_index.getptr(window_key(n));
+		if (!index) {
 			continue;
 		}
 		const int32_t phys = _alloc_page();
@@ -359,50 +489,117 @@ bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p
 		}
 		_free_entry(n.entry);
 		entry_valid.write[n.entry] = 1;
-		entry_key.write[n.entry] = _key(n.x, n.y);
+		entry_key.write[n.entry] = n.key;
 		table.write[n.entry * 2] = (uint32_t(phys) << 1) | 1u;
-		table.write[n.entry * 2 + 1] = entry_key[n.entry];
+		table.write[n.entry * 2 + 1] = n.key;
 		phys_entry.write[phys] = n.entry;
 		phys_last_used.write[phys] = frame;
 		table_dirty = true;
-		level_dirty[n.level] = true;
-		const Window &win = windows[*slot];
+		level_dirty[_slot_level(p_slot, n.level)] = true;
+		const Window &win = windows[*index];
 		copies.push_back(win.rect.position.x + (n.x - win.wx * WINDOW_PAGES) * TEXELS);
-		copies.push_back(win.rect.position.y + (n.y - win.wy * WINDOW_PAGES) * TEXELS); // Window row 0 is the smallest light-space y.
+		copies.push_back(win.rect.position.y + (n.y - win.wy * WINDOW_PAGES) * TEXELS); // Window row 0 is the smallest y.
 		copies.push_back((uint32_t(phys) % pool_cols) * TEXELS);
 		copies.push_back((uint32_t(phys) / pool_cols) * TEXELS);
 		stats.rendered++;
 	}
-	have_requests = false;
+}
+
+bool VirtualShadowsEffect::plan_light(RID p_light_instance, bool p_directional, const Transform3D &p_transform, const Projection &p_projection, float p_normal_bias, const LocalVector<AABB> &p_invalidate) {
+	if (!enabled) {
+		return false;
+	}
+	int32_t s = _slot_of(p_light_instance);
+	if (s < 0) {
+		if (p_directional) {
+			if (slots[0].valid) {
+				return false; // Only the first shadowed directional light.
+			}
+			s = 0;
+		} else {
+			for (uint32_t i = 1; i <= SPOT_SLOTS && s < 0; i++) {
+				if (!slots[i].valid) {
+					s = i;
+				}
+			}
+			if (s < 0) {
+				return false;
+			}
+		}
+		_free_slot(s);
+	}
+	Slot &slot = slots[s];
+	if (p_directional) {
+		_plan_directional(slot, 0, p_transform, p_projection.get_z_far());
+	} else {
+		_plan_spot(slot, p_transform, p_projection);
+	}
+	slot.valid = true;
+	slot.light = p_light_instance;
+	slot.last_seen = frame;
+	slot.normal_bias = p_normal_bias;
+	_invalidate(s, p_invalidate);
+	_plan_windows(s);
 	return true;
 }
 
-Rect2 VirtualShadowsEffect::get_light_rect(const AABB &p_aabb) const {
-	Vector2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
-	for (int c = 0; c < 8; c++) {
-		const Vector2 l = _light_xy(p_aabb.get_endpoint(c));
-		lo = lo.min(l);
-		hi = hi.max(l);
+void VirtualShadowsEffect::get_windows(RID p_light_instance, LocalVector<const Window *> &r_windows) const {
+	const int32_t s = _slot_of(p_light_instance);
+	for (const Window &w : windows) {
+		if (int32_t(w.slot) == s) {
+			r_windows.push_back(&w);
+		}
 	}
-	return Rect2(lo, hi - lo);
-}
-
-Rect2 VirtualShadowsEffect::get_window_light_rect(const Window &p_window) const {
-	const float extent = _page_size(p_window.level) * WINDOW_PAGES;
-	return Rect2(Vector2(p_window.wx, p_window.wy) * extent, Vector2(extent, extent));
 }
 
 Projection VirtualShadowsEffect::get_window_projection(const Window &p_window) const {
-	const float half = _page_size(p_window.level) * WINDOW_PAGES * 0.5f;
+	const Slot &slot = slots[p_window.slot];
 	Projection p;
-	p.set_orthogonal(-half, half, -half, half, 0, z_range);
+	if (p_window.slot == 0) {
+		const float half = _page_size(p_window.level) * WINDOW_PAGES * 0.5f;
+		p.set_orthogonal(-half, half, -half, half, 0, slot.z_range);
+	} else {
+		// The part of the light frustum under this window, on the near plane.
+		const Vector2 he = slot.projection.get_viewport_half_extents();
+		const float pages = float(PAGES >> p_window.level);
+		const float u0 = float(p_window.wx * WINDOW_PAGES) / pages * 2.0f - 1.0f, u1 = float((p_window.wx + 1) * WINDOW_PAGES) / pages * 2.0f - 1.0f;
+		const float v0 = float(p_window.wy * WINDOW_PAGES) / pages * 2.0f - 1.0f, v1 = float((p_window.wy + 1) * WINDOW_PAGES) / pages * 2.0f - 1.0f;
+		p.set_frustum(u0 * he.x, u1 * he.x, v0 * he.y, v1 * he.y, slot.projection.get_z_near(), slot.projection.get_z_far());
+	}
 	return p;
 }
 
 Transform3D VirtualShadowsEffect::get_window_transform(const Window &p_window) const {
+	const Slot &slot = slots[p_window.slot];
+	if (p_window.slot != 0) {
+		return slot.transform;
+	}
 	const float ps = _page_size(p_window.level);
 	const Vector2 center = Vector2(p_window.wx, p_window.wy) * ps * WINDOW_PAGES + Vector2(1, 1) * ps * WINDOW_PAGES * 0.5f;
-	return Transform3D(basis, basis.xform(Vector3(center.x, center.y, z_origin)));
+	return Transform3D(slot.basis, slot.basis.xform(Vector3(center.x, center.y, slot.z_origin)));
+}
+
+bool VirtualShadowsEffect::window_touches(const Window &p_window, const AABB &p_aabb) const {
+	const Slot &slot = slots[p_window.slot];
+	if (p_window.slot == 0) {
+		Vector2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
+		for (int c = 0; c < 8; c++) {
+			const Vector2 l = _light_xy(slot, p_aabb.get_endpoint(c));
+			lo = lo.min(l);
+			hi = hi.max(l);
+		}
+		const float extent = _page_size(p_window.level) * WINDOW_PAGES;
+		return Rect2(Vector2(p_window.wx, p_window.wy) * extent, Vector2(extent, extent)).intersects(Rect2(lo, hi - lo));
+	}
+	bool all = false;
+	const Rect2 ndc = _spot_ndc_rect(slot, p_aabb, all);
+	if (all) {
+		return true;
+	}
+	const float pages = float(PAGES >> p_window.level);
+	const float u0 = float(p_window.wx * WINDOW_PAGES) / pages * 2.0f - 1.0f, v0 = float(p_window.wy * WINDOW_PAGES) / pages * 2.0f - 1.0f;
+	const float size = float(WINDOW_PAGES) / pages * 2.0f;
+	return Rect2(u0, v0, size, size).intersects(ndc);
 }
 
 void VirtualShadowsEffect::copy_pages() {
@@ -410,7 +607,7 @@ void VirtualShadowsEffect::copy_pages() {
 		return;
 	}
 	if (OS::get_singleton()->is_stdout_verbose() && !windows.is_empty()) {
-		print_line(vformat("Virtual shadows: frame %d light %s valid %d requests %d/%d pending %d planned windows %d rendered pages %d missing %d of %d requested (%d windows needed), %d pool pages free.", frame, light.is_valid() ? "set" : "none", int(light_valid), int(have_requests), requests.size(), int(requests_pending), windows.size(), stats.rendered, stats.missing, stats.requested, stats.windows_needed, free_list.size()));
+		print_line(vformat("Virtual shadows: frame %d planned windows %d rendered pages %d missing %d of %d requested (%d windows needed), %d pool pages free.", frame, windows.size(), stats.rendered, stats.missing, stats.requested, stats.windows_needed, free_list.size()));
 	}
 	if (!copies.is_empty()) {
 		RD::get_singleton()->buffer_update(copy_buffer, 0, copies.size() * sizeof(uint32_t), copies.ptr());
@@ -434,7 +631,7 @@ void VirtualShadowsEffect::copy_pages() {
 	}
 	if (table_dirty) {
 		table_dirty = false;
-		for (uint32_t level = 0; level < LEVELS; level++) {
+		for (uint32_t level = 0; level < TOTAL_LEVELS; level++) {
 			if (level_dirty[level]) {
 				level_dirty[level] = false;
 				const uint64_t offset = uint64_t(level) * ENTRIES_PER_LEVEL * 2 * sizeof(uint32_t);
@@ -448,7 +645,6 @@ void VirtualShadowsEffect::_dump(RID p_texture, const String &p_path, int p_step
 	RD::TextureFormat tf = RD::get_singleton()->texture_get_format(p_texture);
 	Vector<uint8_t> data = RD::get_singleton()->texture_get_data(p_texture, 0);
 	if (data.size() != int64_t(tf.width) * tf.height * 4) {
-		ERR_PRINT(vformat("Virtual shadows: unexpected texture data size %d for %dx%d.", data.size(), tf.width, tf.height));
 		return;
 	}
 	const float *src = reinterpret_cast<const float *>(data.ptr());
@@ -465,27 +661,50 @@ void VirtualShadowsEffect::_dump(RID p_texture, const String &p_path, int p_step
 	print_line(vformat("Virtual shadows: dumped %s (%dx%d).", p_path, w, h));
 }
 
-void VirtualShadowsEffect::fill_light_data(RID p_light_instance, bool p_shadows, float *r_light_view, float *r_depth_row, float *r_params, uint32_t *r_info) const {
+void VirtualShadowsEffect::fill_directional_light_data(RID p_light_instance, bool p_shadows, float *r_light_view, float *r_depth_row, float *r_params, uint32_t *r_info) const {
 	r_info[0] = r_info[1] = r_info[2] = r_info[3] = 0;
-	if (!enabled || !light_valid || !p_shadows || p_light_instance != light) {
+	const Slot &slot = slots[0];
+	if (!enabled || !slot.valid || !p_shadows || p_light_instance != slot.light) {
 		return;
 	}
-	MaterialStorage::store_transform(Transform3D(basis, Vector3()).affine_inverse(), r_light_view);
+	MaterialStorage::store_transform(Transform3D(slot.basis, Vector3()).affine_inverse(), r_light_view);
 	// The depth a window render writes for a world position: same z mapping for every window and level.
 	Projection correction;
 	correction.set_depth_correction(false);
 	Projection ortho;
-	ortho.set_orthogonal(-1, 1, -1, 1, 0, z_range);
-	Projection m = correction * ortho * Projection(Transform3D(basis, basis.xform(Vector3(0, 0, z_origin))).affine_inverse());
+	ortho.set_orthogonal(-1, 1, -1, 1, 0, slot.z_range);
+	Projection m = correction * ortho * Projection(Transform3D(slot.basis, slot.basis.xform(Vector3(0, 0, slot.z_origin))).affine_inverse());
 	for (int c = 0; c < 4; c++) {
 		r_depth_row[c] = m.columns[c][2];
 	}
 	r_params[0] = base_extent;
 	r_params[1] = LEVELS;
 	r_params[2] = 0.0f;
-	r_params[3] = normal_bias;
+	r_params[3] = slot.normal_bias;
 	r_info[0] = 1;
 	r_info[1] = 0;
 	r_info[2] = pool_cols;
 	r_info[3] = debug_mode;
+}
+
+void VirtualShadowsEffect::fill_spot_light_data(RID p_light_instance, bool p_shadows, const Transform3D &p_camera_inverse_transform, const Transform3D &p_light_transform, float p_pixel_scale, float *r_matrix, float *r_params, uint32_t *r_info) const {
+	r_info[0] = r_info[1] = r_info[2] = r_info[3] = 0;
+	const int32_t s = enabled && p_shadows ? _slot_of(p_light_instance) : -1;
+	if (s <= 0) {
+		return;
+	}
+	const Slot &slot = slots[s];
+	Projection correction;
+	correction.set_depth_correction(false);
+	// View space to the light's clip space, as the window renders see it.
+	Projection m = correction * slot.projection * Projection((p_camera_inverse_transform * p_light_transform).affine_inverse());
+	MaterialStorage::store_camera(m, r_matrix);
+	r_params[0] = slot.projection.get_viewport_half_extents().x / slot.projection.get_z_near();
+	r_params[1] = SPOT_MIPS;
+	r_params[2] = slot.normal_bias;
+	r_params[3] = p_pixel_scale;
+	r_info[0] = 1;
+	r_info[1] = _slot_level(s, 0) * ENTRIES_PER_LEVEL;
+	r_info[2] = pool_cols;
+	r_info[3] = slot.version;
 }

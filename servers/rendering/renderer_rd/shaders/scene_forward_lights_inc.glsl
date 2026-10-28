@@ -764,6 +764,50 @@ vec2 normal_to_panorama(vec3 n) {
 	return panorama_coords;
 }
 
+#ifdef VIRTUAL_SHADOWS
+// Virtual shadow map lookup for spot light idx (v is the biased view-space position): walks the mips from the one
+// matching the pixel footprint to coarser ones until a resident page is found. Lit when none is.
+float vsm_spot_shadow(uint idx, vec4 v, float dist) {
+	vec4 params = spot_lights.data[idx].vsm_params;
+	uvec4 info = spot_lights.data[idx].vsm_info;
+	vec4 clip = spot_lights.data[idx].vsm_matrix * v;
+	if (clip.w <= 0.0) {
+		return 1.0;
+	}
+	vec3 ndc = clip.xyz / clip.w;
+	if (any(greaterThan(abs(ndc.xy), vec2(1.0)))) {
+		return 1.0;
+	}
+	float ref = ndc.z + spot_lights.data[idx].shadow_bias;
+	float footprint = -v.z * 2.0 / params.w; // params.w = projection[1][1] * viewport height
+	int mips = int(params.y);
+	int mip = clamp(int(ceil(log2(footprint * 16384.0 / (2.0 * dist * params.x)))), 0, mips - 1);
+	vec2 uv = ndc.xy * 0.5 + 0.5;
+	for (; mip < mips; mip++) {
+		float pages = float(128 >> mip);
+		vec2 pp = uv * pages;
+		ivec2 page = clamp(ivec2(floor(pp)), ivec2(0), ivec2(int(pages) - 1));
+		uvec2 e = vsm_page_table.data[info.y + uint(mip) * 16384u + uint(page.y) * 128u + uint(page.x)];
+		if ((e.x & 1u) == 0u || e.y != info.w) {
+			continue;
+		}
+		uint phys = e.x >> 1u;
+		ivec2 base = ivec2((phys % info.z) * 128u, (phys / info.z) * 128u);
+		ivec2 c = ivec2(fract(pp) * 128.0);
+		float lit = 0.0;
+		for (int dy = -1; dy <= 1; dy++) {
+			for (int dx = -1; dx <= 1; dx++) {
+				ivec2 t = clamp(c + ivec2(dx, dy), ivec2(0), ivec2(127));
+				float d = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), base + t, 0).r;
+				lit += ref > d ? 1.0 : 0.0;
+			}
+		}
+		return lit / 9.0;
+	}
+	return 1.0;
+}
+#endif
+
 void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3 vertex_ddx, vec3 vertex_ddy, hvec3 f0, half roughness, half metallic, float taa_frame_count, hvec3 albedo, inout half alpha, vec2 screen_uv, hvec3 energy_compensation,
 #ifdef LIGHT_BACKLIGHT_USED
 		hvec3 backlight,
@@ -819,7 +863,12 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		splane.z += spot_lights.data[idx].shadow_bias;
 		splane /= splane.w;
 
-		if (sc_use_light_soft_shadows() && spot_lights.data[idx].soft_shadow_size > 0.0) {
+#ifdef VIRTUAL_SHADOWS
+		if (spot_lights.data[idx].vsm_info.x != 0u) {
+			shadow = mix(half(1.0), half(vsm_spot_shadow(idx, v, light_length)), half(spot_lights.data[idx].shadow_opacity));
+		} else
+#endif
+				if (sc_use_light_soft_shadows() && spot_lights.data[idx].soft_shadow_size > 0.0) {
 			//soft shadow
 
 			//find blocker
