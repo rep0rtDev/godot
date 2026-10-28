@@ -32,6 +32,7 @@
 
 #include "core/error/error_macros.h"
 #include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
 #include "core/object/class_db.h"
@@ -3471,6 +3472,32 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 	}
 
 	scene = _generate_meshes(scene, mesh_data, gen_lods, create_shadow_meshes, virtual_geometry, LightBakeMode(light_bake_mode), lightmap_texel_size, src_lightmap_cache, mesh_lightmap_caches);
+	if (virtual_geometry) {
+		// Cluster pages go to files next to the imported scene, so that only root pages are loaded with it.
+		List<Node *> queue;
+		queue.push_back(scene);
+		HashSet<Ref<ArrayMesh>> done;
+		int page_files = 0;
+		while (!queue.is_empty()) {
+			Node *n = queue.front()->get();
+			queue.pop_front();
+			MeshInstance3D *mi = Object::cast_to<MeshInstance3D>(n);
+			Ref<ArrayMesh> am = mi ? mi->get_mesh() : Ref<Mesh>();
+			if (am.is_valid() && !done.has(am)) {
+				done.insert(am);
+				const String path = p_save_path + "-" + itos(page_files) + ".vgpages";
+				if (am->save_virtual_geometry_pages(path) == OK && FileAccess::exists(path)) {
+					page_files++;
+					if (r_gen_files) {
+						r_gen_files->push_back(path);
+					}
+				}
+			}
+			for (int i = 0; i < n->get_child_count(); i++) {
+				queue.push_back(n->get_child(i));
+			}
+		}
+	}
 
 	if (mesh_lightmap_caches.size()) {
 		Ref<FileAccess> f = FileAccess::open(p_source_file + ".unwrap_cache", FileAccess::WRITE);

@@ -31,7 +31,9 @@
 #include "mesh_storage.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/file_access.h"
 #include "core/object/callable_mp.h"
+#include "core/object/worker_thread_pool.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -441,6 +443,8 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 		VirtualGeometryHeader vg_header;
 		if (VirtualGeometry::unpack_header(new_surface.vg_cluster_data, vg_header)) {
 			s->vg_cluster_data = new_surface.vg_cluster_data;
+			s->vg_page_path = new_surface.vg_page_path;
+			s->vg_page_file_offset = new_surface.vg_page_file_offset;
 			s->vg_cluster_count = vg_header.cluster_count;
 			s->vg_node_count = vg_header.node_count;
 			s->vg_leaf_index_count = new_surface.vg_leaf_index_count;
@@ -471,6 +475,7 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 				s->vg_page_slot.resize(vg_header.page_count);
 				s->vg_page_slot.fill(-1);
 				s->vg_page_dependents.resize_initialized(vg_header.page_count);
+				s->vg_page_loading.resize_initialized(vg_header.page_count);
 				s->vg_page_table.fill(UINT32_MAX); // NOT_RESIDENT.
 				if (_vg_install_page(s, 0, vg_pool.frame)) {
 					s->vg_page_table_dirty = false;
@@ -491,7 +496,28 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 			}
 			if (!streaming) {
 				// Every page resident, in file order: a cluster's geometry offset addresses the buffer directly.
-				s->vg_page_buffer = RD::get_singleton()->storage_buffer_create(vg_header.data_size, new_surface.vg_cluster_data.slice(page_data_offset));
+				Vector<uint8_t> page_data = new_surface.vg_cluster_data.slice(page_data_offset);
+				if (page_data.size() < int64_t(vg_header.data_size)) {
+					// Pages in a file: read them all now. Without the file only the root page (in the resource) draws.
+					Ref<FileAccess> f = s->vg_page_path.is_empty() ? Ref<FileAccess>() : FileAccess::open(s->vg_page_path, FileAccess::READ);
+					Vector<uint8_t> file_data;
+					if (f.is_valid()) {
+						f->seek(s->vg_page_file_offset);
+						file_data = f->get_buffer(vg_header.data_size);
+					}
+					if (file_data.size() == int64_t(vg_header.data_size)) {
+						page_data = file_data;
+					} else {
+						WARN_PRINT(vformat("Virtual geometry: cannot read pages from '%s', drawing the root page only.", s->vg_page_path));
+						const uint32_t root_size = page_data.size();
+						page_data.resize(vg_header.data_size);
+						memset(page_data.ptrw() + root_size, 0, vg_header.data_size - root_size);
+						for (uint32_t pg = 1; pg < vg_header.page_count; pg++) {
+							s->vg_page_table.write[pg] = UINT32_MAX;
+						}
+					}
+				}
+				s->vg_page_buffer = RD::get_singleton()->storage_buffer_create(vg_header.data_size, page_data);
 				s->vg_page_table_buffer = RD::get_singleton()->storage_buffer_create(s->vg_page_table.size() * sizeof(uint32_t), s->vg_page_table.to_byte_array());
 			}
 		}
@@ -616,6 +642,11 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 		RD::get_singleton()->free_rid(s.vg_cluster_buffer);
 	}
 	if (s.vg_streaming) {
+		_vg_finish_loads(&s, true);
+		{
+			MutexLock lock(vg_load_mutex);
+			vg_streaming_surfaces.erase(s.vg_stream_id);
+		}
 		_vg_evict_surface(&s);
 	} else if (s.vg_page_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.vg_page_buffer);
@@ -628,9 +659,6 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 	}
 	if (s.vg_request_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.vg_request_buffer);
-	}
-	if (s.vg_stream_id != 0) {
-		vg_streaming_surfaces.erase(s.vg_stream_id);
 	}
 	if (s.index_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.index_buffer);
@@ -771,6 +799,7 @@ RID MeshStorage::mesh_surface_get_material(RID p_mesh, int p_surface) const {
 HashMap<uint32_t, MeshStorage::Mesh::Surface *> MeshStorage::vg_streaming_surfaces;
 uint32_t MeshStorage::vg_stream_id_counter = 0;
 MeshStorage::VGPool MeshStorage::vg_pool;
+Mutex MeshStorage::vg_load_mutex;
 bool MeshStorage::vg_pull_supported = false;
 
 const VirtualGeometryPage *MeshStorage::_vg_pages(const Mesh::Surface *p_surface) {
@@ -785,6 +814,26 @@ const uint32_t *MeshStorage::_vg_dependencies(const Mesh::Surface *p_surface) {
 bool MeshStorage::_vg_install_page(Mesh::Surface *p_surface, uint32_t p_page, uint64_t p_frame) {
 	if (p_surface->vg_page_slot[p_page] >= 0) {
 		return true;
+	}
+	Vector<uint8_t> loaded;
+	if (!_vg_page_in_memory(p_surface, p_page)) {
+		// Page in the file: take it from the finished reads, or ask for it and come back when it has arrived.
+		MutexLock lock(vg_load_mutex);
+		for (uint32_t i = 0; i < p_surface->vg_pages_loaded.size(); i++) {
+			if (p_surface->vg_pages_loaded[i].first == p_page) {
+				loaded = p_surface->vg_pages_loaded[i].second;
+				p_surface->vg_pages_loaded.remove_at_unordered(i);
+				break;
+			}
+		}
+		if (loaded.is_empty()) {
+			if (!p_surface->vg_page_loading[p_page]) {
+				p_surface->vg_page_loading.write[p_page] = 1;
+				p_surface->vg_pages_to_load.push_back(p_page);
+			}
+			return false;
+		}
+		p_surface->vg_page_loading.write[p_page] = 0;
 	}
 	int32_t slot = -1;
 	for (uint32_t i = 0; i < vg_pool.slots; i++) {
@@ -807,13 +856,18 @@ bool MeshStorage::_vg_install_page(Mesh::Surface *p_surface, uint32_t p_page, ui
 			}
 		}
 		if (victim < 0) {
+			if (!loaded.is_empty()) {
+				MutexLock lock(vg_load_mutex);
+				p_surface->vg_pages_loaded.push_back(Pair<uint32_t, Vector<uint8_t>>(p_page, loaded));
+				p_surface->vg_page_loading.write[p_page] = 1;
+			}
 			return false;
 		}
 		slot = victim;
 		_vg_evict_page(vg_pool.slot_surface[victim], vg_pool.slot_page[victim]);
 	}
 	const VirtualGeometryPage &page = _vg_pages(p_surface)[p_page];
-	const uint8_t *data = p_surface->vg_cluster_data.ptr() + VirtualGeometry::get_page_data_offset(p_surface->vg_header) + page.offset;
+	const uint8_t *data = loaded.is_empty() ? p_surface->vg_cluster_data.ptr() + VirtualGeometry::get_page_data_offset(p_surface->vg_header) + page.offset : loaded.ptr();
 	RD::get_singleton()->buffer_update(vg_pool.buffer, uint64_t(slot) * VirtualGeometry::PAGE_SIZE, page.size, data);
 	p_surface->vg_page_slot.write[p_page] = slot;
 	vg_pool.slot_surface.write[slot] = p_surface;
@@ -843,6 +897,52 @@ void MeshStorage::_vg_evict_page(Mesh::Surface *p_surface, uint32_t p_page) {
 	const uint32_t *deps = _vg_dependencies(p_surface);
 	for (uint32_t d = 0; d < page.dependency_count; d++) {
 		p_surface->vg_page_dependents.write[deps[page.dependency_first + d]]--;
+	}
+}
+
+bool MeshStorage::_vg_page_in_memory(const Mesh::Surface *p_surface, uint32_t p_page) {
+	const VirtualGeometryPage &page = _vg_pages(p_surface)[p_page];
+	return p_surface->vg_cluster_data.size() >= int64_t(VirtualGeometry::get_page_data_offset(p_surface->vg_header)) + page.offset + page.size;
+}
+
+// Worker thread: reads the pages of one job and hands them to the surface, if it still exists.
+void MeshStorage::_vg_load_pages(void *p_job) {
+	VGLoadJob *job = static_cast<VGLoadJob *>(p_job);
+	Ref<FileAccess> f = FileAccess::open(job->path, FileAccess::READ);
+	if (f.is_null()) {
+		ERR_PRINT_ONCE(vformat("Virtual geometry: cannot open page file '%s'.", job->path));
+	}
+	for (uint32_t i = 0; i < job->pages.size(); i++) {
+		Vector<uint8_t> bytes;
+		if (f.is_valid()) {
+			f->seek(job->file_offset + job->offsets[i]);
+			bytes = f->get_buffer(job->sizes[i]);
+			if (bytes.size() != int64_t(job->sizes[i])) {
+				bytes.clear();
+			}
+		}
+		MutexLock lock(vg_load_mutex);
+		Mesh::Surface **surface = vg_streaming_surfaces.getptr(job->stream_id);
+		if (!surface) {
+			break;
+		}
+		if (bytes.is_empty()) {
+			(*surface)->vg_page_loading.write[job->pages[i]] = 0; // Give up on it; a later request tries again.
+		} else {
+			(*surface)->vg_pages_loaded.push_back(Pair<uint32_t, Vector<uint8_t>>(job->pages[i], bytes));
+		}
+	}
+	memdelete(job);
+}
+
+// Reaps finished read tasks (every task has to be waited on once); with p_wait, blocks for the running ones.
+void MeshStorage::_vg_finish_loads(Mesh::Surface *p_surface, bool p_wait) {
+	for (int64_t i = int64_t(p_surface->vg_load_tasks.size()) - 1; i >= 0; i--) {
+		const WorkerThreadPool::TaskID task = p_surface->vg_load_tasks[i];
+		if (p_wait || WorkerThreadPool::get_singleton()->is_task_completed(task)) {
+			WorkerThreadPool::get_singleton()->wait_for_task_completion(task);
+			p_surface->vg_load_tasks.remove_at_unordered(i);
+		}
 	}
 }
 
@@ -890,10 +990,36 @@ void MeshStorage::mesh_surface_vg_stream(void *p_surface, uint64_t p_frame) {
 		vg_pool.frame = p_frame;
 		vg_pool.installed = 0;
 	}
+	_vg_finish_loads(s, false);
+	const uint32_t budget = GLOBAL_GET("rendering/virtual_geometry/streaming/pages_per_frame");
+	uint32_t &installed = vg_pool.installed;
+	bool dirty = false;
+	{
+		// Pages that arrived from the file since the last step; their budget was spent when the read was issued.
+		LocalVector<uint32_t> arrived;
+		{
+			MutexLock lock(vg_load_mutex);
+			for (const Pair<uint32_t, Vector<uint8_t>> &p : s->vg_pages_loaded) {
+				arrived.push_back(p.first);
+			}
+		}
+		for (const uint32_t pg : arrived) {
+			if (_vg_install_page(s, pg, p_frame)) {
+				dirty = true;
+			} else {
+				// No room now: drop the bytes, a request that still wants the page reads it again.
+				MutexLock lock(vg_load_mutex);
+				for (uint32_t i = 0; i < s->vg_pages_loaded.size(); i++) {
+					if (s->vg_pages_loaded[i].first == pg) {
+						s->vg_pages_loaded.remove_at_unordered(i);
+						break;
+					}
+				}
+				s->vg_page_loading.write[pg] = 0;
+			}
+		}
+	}
 	if (s->vg_requests.size() == int(s->vg_header.page_count)) {
-		const uint32_t budget = GLOBAL_GET("rendering/virtual_geometry/streaming/pages_per_frame");
-		uint32_t &installed = vg_pool.installed;
-		bool dirty = false;
 		for (uint32_t pg = 0; pg < s->vg_header.page_count; pg++) {
 			if ((s->vg_requests[pg] & 1) && s->vg_page_slot[pg] >= 0) {
 				vg_pool.slot_last_used.write[s->vg_page_slot[pg]] = p_frame;
@@ -921,6 +1047,24 @@ void MeshStorage::mesh_surface_vg_stream(void *p_surface, uint64_t p_frame) {
 			}
 		}
 		s->vg_requests.clear();
+	}
+	{
+		if (!s->vg_pages_to_load.is_empty()) {
+			// One read task per step and surface; issued reads count against the frame budget like installs.
+			VGLoadJob *job = memnew(VGLoadJob);
+			job->stream_id = s->vg_stream_id;
+			job->path = s->vg_page_path;
+			job->file_offset = s->vg_page_file_offset;
+			const VirtualGeometryPage *pages = _vg_pages(s);
+			for (const uint32_t pg : s->vg_pages_to_load) {
+				job->pages.push_back(pg);
+				job->offsets.push_back(pages[pg].offset);
+				job->sizes.push_back(pages[pg].size);
+				installed++;
+			}
+			s->vg_pages_to_load.clear();
+			s->vg_load_tasks.push_back(WorkerThreadPool::get_singleton()->add_native_task(&MeshStorage::_vg_load_pages, job, false, "Virtual geometry pages"));
+		}
 		if (dirty) {
 			uint32_t used = 0;
 			for (uint32_t i = 0; i < vg_pool.slots; i++) {
@@ -983,6 +1127,8 @@ RenderingServerTypes::SurfaceData MeshStorage::mesh_get_surface(RID p_mesh, int 
 	}
 	sd.vg_cluster_data = s.vg_cluster_data;
 	sd.vg_leaf_index_count = s.vg_leaf_index_count;
+	sd.vg_page_path = s.vg_page_path;
+	sd.vg_page_file_offset = s.vg_page_file_offset;
 	sd.aabb = s.aabb;
 	sd.uv_scale = s.uv_scale;
 	for (uint32_t i = 0; i < s.lod_count; i++) {

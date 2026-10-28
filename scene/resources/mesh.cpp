@@ -30,11 +30,13 @@
 
 #include "mesh.h"
 
+#include "core/io/file_access.h"
 #include "core/math/convex_hull.h"
 #include "core/object/class_db.h"
 #include "core/templates/pair.h"
 #include "scene/resources/surface_tool.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/virtual_geometry.h"
 
 #ifndef PHYSICS_3D_DISABLED
 #include "scene/resources/3d/concave_polygon_shape_3d.h"
@@ -1567,6 +1569,10 @@ Array ArrayMesh::_get_surfaces() const {
 		if (surface.vg_cluster_data.size()) {
 			data["vg_clusters"] = surface.vg_cluster_data;
 			data["vg_leaf_index_count"] = surface.vg_leaf_index_count;
+			if (!surface.vg_page_path.is_empty()) {
+				data["vg_page_path"] = surface.vg_page_path;
+				data["vg_page_file_offset"] = surface.vg_page_file_offset;
+			}
 		}
 
 		Array lods;
@@ -1657,6 +1663,8 @@ void ArrayMesh::_set_surfaces(const Array &p_surfaces) {
 		if (d.has("vg_clusters")) {
 			surface.vg_cluster_data = d["vg_clusters"];
 			surface.vg_leaf_index_count = d.get("vg_leaf_index_count", 0);
+			surface.vg_page_path = d.get("vg_page_path", String());
+			surface.vg_page_file_offset = d.get("vg_page_file_offset", 0);
 		}
 
 		if (d.has("lods")) {
@@ -1819,7 +1827,62 @@ void ArrayMesh::_recompute_aabb() {
 }
 
 // TODO: Need to add binding to add_surface using future MeshSurfaceData object.
-void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_primitive, const Vector<uint8_t> &p_array, const Vector<uint8_t> &p_attribute_array, const Vector<uint8_t> &p_skin_array, int p_vertex_count, const Vector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<uint8_t> &p_blend_shape_data, const Vector<AABB> &p_bone_aabbs, const Vector<RenderingServerTypes::SurfaceData::LOD> &p_lods, const Vector4 p_uv_scale, const Vector<uint8_t> &p_vg_cluster_data, uint32_t p_vg_leaf_index_count) {
+// Moves the cluster pages of every virtual geometry surface into p_path, keeping only the metadata and the root
+// page in the resource; the renderer then streams the other pages from that file.
+Error ArrayMesh::save_virtual_geometry_pages(const String &p_path) {
+	Vector<RenderingServerTypes::SurfaceData> data;
+	bool any = false;
+	for (int i = 0; i < surfaces.size(); i++) {
+		RenderingServerTypes::SurfaceData sd = RS::get_singleton()->mesh_get_surface(mesh, i);
+		VirtualGeometryHeader header;
+		any = any || (sd.vg_cluster_data.size() && VirtualGeometry::unpack_header(sd.vg_cluster_data, header));
+		data.push_back(sd);
+	}
+	if (!any) {
+		return OK;
+	}
+	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::WRITE);
+	ERR_FAIL_COND_V_MSG(f.is_null(), FileAccess::get_open_error(), vformat("Cannot write virtual geometry pages to '%s'.", p_path));
+	for (int i = 0; i < data.size(); i++) {
+		RenderingServerTypes::SurfaceData &sd = data.write[i];
+		VirtualGeometryHeader header;
+		if (sd.vg_cluster_data.is_empty() || !VirtualGeometry::unpack_header(sd.vg_cluster_data, header)) {
+			continue;
+		}
+		const uint32_t page_data_offset = VirtualGeometry::get_page_data_offset(header);
+		const uint32_t page_table_offset = VirtualGeometry::get_page_table_offset(header);
+		const VirtualGeometryPage *pages = reinterpret_cast<const VirtualGeometryPage *>(sd.vg_cluster_data.ptr() + page_table_offset);
+		if (sd.vg_cluster_data.size() < int64_t(page_data_offset) + header.data_size) {
+			// Pages already live in a file (or are missing); copy what is there.
+			ERR_FAIL_COND_V_MSG(sd.vg_page_path.is_empty(), ERR_INVALID_DATA, "Virtual geometry surface has no page data.");
+			Ref<FileAccess> src = FileAccess::open(sd.vg_page_path, FileAccess::READ);
+			ERR_FAIL_COND_V_MSG(src.is_null(), ERR_FILE_CANT_READ, vformat("Cannot read virtual geometry pages from '%s'.", sd.vg_page_path));
+			src->seek(sd.vg_page_file_offset);
+			Vector<uint8_t> bytes = src->get_buffer(header.data_size);
+			ERR_FAIL_COND_V(bytes.size() != int64_t(header.data_size), ERR_FILE_CORRUPT);
+			sd.vg_page_file_offset = f->get_position();
+			f->store_buffer(bytes.ptr(), bytes.size());
+		} else {
+			sd.vg_page_file_offset = f->get_position();
+			f->store_buffer(sd.vg_cluster_data.ptr() + page_data_offset, header.data_size);
+			sd.vg_cluster_data.resize(page_data_offset + pages[0].size);
+		}
+		sd.vg_page_path = p_path;
+	}
+	f.unref();
+	RS::get_singleton()->mesh_clear(mesh);
+	for (int i = 0; i < data.size(); i++) {
+		RS::get_singleton()->mesh_add_surface(mesh, data[i]);
+		if (surfaces[i].material.is_valid()) {
+			RS::get_singleton()->mesh_surface_set_material(mesh, i, surfaces[i].material->get_rid());
+		}
+	}
+	clear_cache();
+	emit_changed();
+	return OK;
+}
+
+void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_primitive, const Vector<uint8_t> &p_array, const Vector<uint8_t> &p_attribute_array, const Vector<uint8_t> &p_skin_array, int p_vertex_count, const Vector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<uint8_t> &p_blend_shape_data, const Vector<AABB> &p_bone_aabbs, const Vector<RenderingServerTypes::SurfaceData::LOD> &p_lods, const Vector4 p_uv_scale, const Vector<uint8_t> &p_vg_cluster_data, uint32_t p_vg_leaf_index_count, const String &p_vg_page_path, uint64_t p_vg_page_file_offset) {
 	ERR_FAIL_COND(surfaces.size() == RSE::MAX_MESH_SURFACES);
 	_create_if_empty();
 
@@ -1850,6 +1913,8 @@ void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_prim
 	sd.uv_scale = p_uv_scale;
 	sd.vg_cluster_data = p_vg_cluster_data;
 	sd.vg_leaf_index_count = p_vg_leaf_index_count;
+	sd.vg_page_path = p_vg_page_path;
+	sd.vg_page_file_offset = p_vg_page_file_offset;
 
 	RenderingServer::get_singleton()->mesh_add_surface(mesh, sd);
 
@@ -1877,7 +1942,7 @@ void ArrayMesh::add_surface_from_arrays(PrimitiveType p_primitive, const Array &
 	print_line("primitive: " + itos(surface.primitive));
 	*/
 
-	add_surface(surface.format, PrimitiveType(surface.primitive), surface.vertex_data, surface.attribute_data, surface.skin_data, surface.vertex_count, surface.index_data, surface.index_count, surface.aabb, surface.blend_shape_data, surface.bone_aabbs, surface.lods, surface.uv_scale, surface.vg_cluster_data, surface.vg_leaf_index_count);
+	add_surface(surface.format, PrimitiveType(surface.primitive), surface.vertex_data, surface.attribute_data, surface.skin_data, surface.vertex_count, surface.index_data, surface.index_count, surface.aabb, surface.blend_shape_data, surface.bone_aabbs, surface.lods, surface.uv_scale, surface.vg_cluster_data, surface.vg_leaf_index_count, surface.vg_page_path, surface.vg_page_file_offset);
 }
 
 Array ArrayMesh::surface_get_arrays(int p_surface) const {
@@ -2339,6 +2404,7 @@ void ArrayMesh::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_blend_shape_mode"), &ArrayMesh::get_blend_shape_mode);
 
 	ClassDB::bind_method(D_METHOD("add_surface_from_arrays", "primitive", "arrays", "blend_shapes", "lods", "flags"), &ArrayMesh::add_surface_from_arrays, DEFVAL(Array()), DEFVAL(Dictionary()), DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("save_virtual_geometry_pages", "path"), &ArrayMesh::save_virtual_geometry_pages);
 	ClassDB::bind_method(D_METHOD("clear_surfaces"), &ArrayMesh::clear_surfaces);
 	ClassDB::bind_method(D_METHOD("surface_remove", "surf_idx"), &ArrayMesh::surface_remove);
 	ClassDB::bind_method(D_METHOD("surface_update_vertex_region", "surf_idx", "offset", "data"), &ArrayMesh::surface_update_vertex_region);

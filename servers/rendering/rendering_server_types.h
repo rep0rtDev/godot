@@ -111,6 +111,10 @@ struct SurfaceData {
 	// cluster level, and the first vg_leaf_index_count indices are the full-detail mesh.
 	Vector<uint8_t> vg_cluster_data;
 	uint32_t vg_leaf_index_count = 0;
+	// When set, vg_cluster_data only holds the metadata and the root page; every page (root included,
+	// at its VirtualGeometryPage offset) is in this file from vg_page_file_offset on.
+	String vg_page_path;
+	uint64_t vg_page_file_offset = 0;
 
 	RID material;
 };

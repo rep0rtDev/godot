@@ -88,6 +88,10 @@ func _init() -> void:
 				mat.albedo_color = Color(0.7, 0.75, 0.8)
 				mesh.surface_set_material(0, mat)
 			mat.cull_mode = {"back": BaseMaterial3D.CULL_BACK, "front": BaseMaterial3D.CULL_FRONT, "disabled": BaseMaterial3D.CULL_DISABLED}[arg("cull", "")]
+	if arg("pages_file", "0") == "1":
+		# Pages move to a file; the renderer reads them back on request.
+		for m in meshes.size():
+			meshes[m].save_virtual_geometry_pages("user://bench_%d.vgpages" % m)
 	var root := Node3D.new()
 	var side := int(ceil(sqrt(count)))
 	for i in count:

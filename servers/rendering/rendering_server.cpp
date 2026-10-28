@@ -2021,6 +2021,8 @@ static RenderingServerTypes::SurfaceData _dict_to_surf(const Dictionary &p_dicti
 	if (p_dictionary.has("vg_clusters")) {
 		sd.vg_cluster_data = p_dictionary["vg_clusters"];
 		sd.vg_leaf_index_count = p_dictionary.get("vg_leaf_index_count", 0);
+		sd.vg_page_path = p_dictionary.get("vg_page_path", String());
+		sd.vg_page_file_offset = p_dictionary.get("vg_page_file_offset", 0);
 	}
 
 	if (p_dictionary.has("lods")) {
@@ -2088,6 +2090,10 @@ Dictionary RenderingServer::_mesh_get_surface(RID p_mesh, int p_idx) {
 	if (sd.vg_cluster_data.size()) {
 		d["vg_clusters"] = sd.vg_cluster_data;
 		d["vg_leaf_index_count"] = sd.vg_leaf_index_count;
+		if (!sd.vg_page_path.is_empty()) {
+			d["vg_page_path"] = sd.vg_page_path;
+			d["vg_page_file_offset"] = sd.vg_page_file_offset;
+		}
 	}
 
 	if (sd.lods.size()) {

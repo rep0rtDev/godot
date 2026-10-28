@@ -97,6 +97,8 @@ public:
 		s->uv_scale = p_surface.uv_scale;
 		s->vg_cluster_data = p_surface.vg_cluster_data;
 		s->vg_leaf_index_count = p_surface.vg_leaf_index_count;
+		s->vg_page_path = p_surface.vg_page_path;
+		s->vg_page_file_offset = p_surface.vg_page_file_offset;
 		s->material = p_surface.material;
 		m->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MESH);
 	}

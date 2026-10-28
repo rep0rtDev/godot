@@ -337,7 +337,14 @@ bool VirtualGeometry::unpack_header(const Vector<uint8_t> &p_data, VirtualGeomet
 	}
 	const uint64_t expected = uint64_t(get_page_data_offset(header)) + header.data_size;
 	if (uint64_t(p_data.size()) != expected) {
-		return false;
+		// Also accepted: the metadata plus the root page only, when the other pages live in a file.
+		if (header.page_count == 0 || uint64_t(p_data.size()) < uint64_t(get_page_data_offset(header))) {
+			return false;
+		}
+		const VirtualGeometryPage *pages = reinterpret_cast<const VirtualGeometryPage *>(p_data.ptr() + get_page_table_offset(header));
+		if (pages[0].offset != 0 || uint64_t(p_data.size()) != uint64_t(get_page_data_offset(header)) + pages[0].size) {
+			return false;
+		}
 	}
 	r_header = header;
 	return true;

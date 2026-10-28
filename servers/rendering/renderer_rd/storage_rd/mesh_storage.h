@@ -30,7 +30,10 @@
 
 #pragma once
 
+#include "core/object/worker_thread_pool.h"
+#include "core/os/mutex.h"
 #include "core/templates/local_vector.h"
+#include "core/templates/pair.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/self_list.h"
 #include "servers/rendering/renderer_compositor.h"
@@ -145,6 +148,13 @@ private:
 			Vector<uint32_t> vg_page_dependents; // Resident pages that depend on this page.
 			Vector<uint32_t> vg_requests; // Last readback.
 			bool vg_requests_pending = false;
+			// Pages outside vg_cluster_data come from this file, read on worker threads (see _vg_load_pages).
+			String vg_page_path;
+			uint64_t vg_page_file_offset = 0;
+			Vector<uint8_t> vg_page_loading; // Per page: a read is on its way.
+			LocalVector<uint32_t> vg_pages_to_load; // Collected during one stream step.
+			LocalVector<Pair<uint32_t, Vector<uint8_t>>> vg_pages_loaded; // Guarded by vg_load_mutex.
+			LocalVector<WorkerThreadPool::TaskID> vg_load_tasks;
 			uint32_t vg_cluster_count = 0;
 			uint32_t vg_leaf_index_count = 0;
 			Vector<uint8_t> vg_cluster_data;
@@ -583,6 +593,18 @@ private:
 		uint32_t installed = 0; // Pages installed in that frame.
 	};
 	static VGPool vg_pool;
+	struct VGLoadJob {
+		uint32_t stream_id = 0;
+		String path;
+		uint64_t file_offset = 0;
+		LocalVector<uint32_t> pages;
+		LocalVector<uint32_t> offsets;
+		LocalVector<uint32_t> sizes;
+	};
+	static Mutex vg_load_mutex;
+	static void _vg_load_pages(void *p_job);
+	static bool _vg_page_in_memory(const Mesh::Surface *p_surface, uint32_t p_page);
+	static void _vg_finish_loads(Mesh::Surface *p_surface, bool p_wait);
 	static bool vg_pull_supported;
 	static uint32_t vg_stream_id_counter;
 	static const VirtualGeometryPage *_vg_pages(const Mesh::Surface *p_surface);
