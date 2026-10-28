@@ -720,7 +720,7 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	if (light_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(light_uniform_set) || sdf_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
 		return; // Nothing lit yet this frame.
 	}
-	Size2i probe_size = Size2i(Math::division_round_up(p_internal_size.x, 16), Math::division_round_up(p_internal_size.y, 16));
+	Size2i probe_size = Size2i(Math::division_round_up(p_internal_size.x, 8), Math::division_round_up(p_internal_size.y, 8));
 	if (screen_probe_texture[0].is_null() || probe_size != screen_probe_size) {
 		for (int i = 0; i < 2; i++) {
 			if (screen_probe_texture[i].is_valid()) {
@@ -786,7 +786,7 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	sp.misc[0] = p_projection.get_z_far();
 	sp.misc[1] = float(frame % 4096);
 	sp.misc[2] = p_hzb.is_valid() && GLOBAL_GET("rendering/global_illumination/surface_cache/screen_trace") ? 1.0f : 0.0f;
-	sp.misc[3] = 0.0f;
+	sp.misc[3] = float(int(GLOBAL_GET("rendering/global_illumination/surface_cache/adaptive_probes")));
 	RD::get_singleton()->buffer_update(screen_params_buffer, 0, sizeof(ScreenParams), &sp);
 
 	RID shader = light_shader.version_get_shader(light_shader_version, LIGHT_MODE_SCREEN_PROBES);

@@ -208,7 +208,8 @@ vec3 sky_radiance(vec3 dir) {
 #if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE) || defined(MODE_SCREEN_REFLECT) || defined(MODE_RADIANCE_PROBES)
 // Screen probes: one per SCREEN_PROBE_SIZE pixels, cosine rays through the SDF into the surface cache, resolved into
 // the GI ambient buffer the forward pass already reads.
-#define SCREEN_PROBE_SIZE 16
+#define SCREEN_PROBE_SIZE 8 // Probe grid pitch; flat 16x16 tiles only trace one of their four probes.
+#define SCREEN_TILE 16
 #define SCREEN_PROBE_RAYS 16
 
 layout(set = 2, binding = 0) uniform texture2D depth_buffer;
@@ -539,6 +540,39 @@ void main() {
 	if (!screen_position(pixel, view_pos, view_normal)) {
 		imageStore(screen_probe_image, local, vec4(0.0));
 		return;
+	}
+	// Adaptive placement: a 16x16 tile whose four probe pixels lie on one surface keeps only its first probe; tiles
+	// across a depth or normal discontinuity trace all four. misc.w: 0 coarse only, 1 adaptive, 2 all probes.
+	int adaptive = int(screen.misc.w);
+	bool first_in_tile = (local.x & 1) == 0 && (local.y & 1) == 0;
+	if (adaptive == 0 || (adaptive == 1 && !first_in_tile)) {
+		bool detailed = false;
+		if (adaptive == 1) {
+			ivec2 tile = local & ~1;
+			float d_min = 1e20;
+			float d_max = 0.0;
+			vec3 n_first = vec3(0.0);
+			for (int k = 0; k < 4; k++) {
+				ivec2 pk = min((tile + ivec2(k & 1, k >> 1)) * SCREEN_PROBE_SIZE + SCREEN_PROBE_SIZE / 2, ivec2(screen.size.xy) - 1);
+				vec3 vp, vn;
+				if (!screen_position(pk, vp, vn)) {
+					detailed = true;
+					break;
+				}
+				d_min = min(d_min, -vp.z);
+				d_max = max(d_max, -vp.z);
+				if (k == 0) {
+					n_first = vn;
+				} else if (dot(vn, n_first) < 0.9) {
+					detailed = true;
+				}
+			}
+			detailed = detailed || (d_max - d_min) > 0.1 * d_min;
+		}
+		if (!detailed && !first_in_tile) {
+			imageStore(screen_probe_image, local, vec4(0.0));
+			return;
+		}
 	}
 	vec3 world = (screen.cam_transform * vec4(view_pos, 1.0)).xyz;
 	vec3 normal = normalize(mat3(screen.cam_transform) * view_normal);
