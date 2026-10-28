@@ -101,6 +101,7 @@ public:
 	// Drop triangles by the sign of their pixel space area, from the material cull mode.
 	static constexpr uint32_t RASTER_FLAG_CULL_POSITIVE = 2;
 	static constexpr uint32_t RASTER_FLAG_CULL_NEGATIVE = 4;
+	static constexpr uint32_t RASTER_FLAG_COMPACT = 8; // Shadow window raster: the command range is compacted with a count.
 	// Rasterized clusters per frame; each visibility buffer id holds the entry in 25 bits.
 	static constexpr uint32_t ENTRY_CAPACITY = 1 << 20;
 	// Material pass tiles, see virtual_geometry_tiles.glsl.
@@ -140,6 +141,7 @@ private:
 	bool collect_stats = false;
 	bool supports_software_raster = false;
 	bool software_raster = false;
+	bool shadow_compute_raster = false;
 	float software_raster_max_pixels = 64.0f;
 	RID stats_buffer;
 	uint64_t stats_frame = 0;
@@ -152,6 +154,7 @@ private:
 	VirtualGeometryRasterShaderRD raster_shader;
 	RID raster_shader_version;
 	RID raster_pipeline;
+	RID shadow_raster_pipeline;
 	VirtualGeometryResolveShaderRD resolve_shader;
 	RID resolve_shader_version;
 	HashMap<RD::FramebufferFormatID, RID> resolve_pipelines;
@@ -204,6 +207,7 @@ public:
 	bool collects_stats() const { return collect_stats; }
 	bool can_rasterize_in_compute() const { return supports_software_raster; }
 	bool uses_software_raster() const { return software_raster; }
+	bool uses_shadow_raster() const { return shadow_compute_raster; }
 	float get_software_raster_max_pixels() const { return software_raster_max_pixels; }
 
 	// Allocates and clears the 64-bit visibility buffer and the entry table for this frame.
@@ -216,6 +220,8 @@ public:
 	// One non-indexed indirect draw command per surface slot, TILE_COMMAND_STRIDE apart.
 	RID get_tile_command_buffer() const { return tile_command_buffer; }
 	RID get_raster_pipeline() const { return raster_pipeline; }
+	RID get_shadow_raster_pipeline() const { return shadow_raster_pipeline; }
+	RID get_shadow_raster_frame_uniform_set(RID p_buffer);
 	// Set 1 of the raster shader: visibility buffer and entry table.
 	RID get_raster_frame_uniform_set() const { return raster_frame_uniform_set; }
 	RID get_visibility_buffer() const { return visibility_buffer; }
@@ -232,6 +238,7 @@ public:
 	static_assert(sizeof(MaterialParams) == 32);
 	static constexpr float SOFTWARE_DEPTH_BIAS = 1.0f / 65536.0f;
 	RID create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_page_buffer, RID p_page_table_buffer) const;
+	RID create_shadow_raster_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_page_buffer, RID p_page_table_buffer) const;
 	// Writes the depth of every rasterized pixel into p_framebuffer's depth attachment.
 	void resolve_software_depth(RID p_framebuffer);
 

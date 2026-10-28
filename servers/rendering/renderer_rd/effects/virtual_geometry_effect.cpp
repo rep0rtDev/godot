@@ -74,6 +74,7 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 
 	occlusion_culling = GLOBAL_GET("rendering/virtual_geometry/occlusion_culling");
 	shadow_window_culling = GLOBAL_GET("rendering/virtual_geometry/shadow_window_culling");
+	shadow_compute_raster = shadow_window_culling && bool(GLOBAL_GET("rendering/virtual_geometry/shadow_compute_raster"));
 
 	Vector<String> modes;
 	modes.push_back("");
@@ -89,9 +90,12 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 	if (supports_software_raster) {
 		Vector<String> raster_modes;
 		raster_modes.push_back("");
-		raster_shader.initialize(raster_modes);
+		Vector<String> raster_variants = raster_modes;
+		raster_variants.push_back("\n#define MODE_SHADOW\n");
+		raster_shader.initialize(raster_variants);
 		raster_shader_version = raster_shader.version_create();
 		raster_pipeline = RD::get_singleton()->compute_pipeline_create(raster_shader.version_get_shader(raster_shader_version, 0));
+		shadow_raster_pipeline = RD::get_singleton()->compute_pipeline_create(raster_shader.version_get_shader(raster_shader_version, 1));
 		resolve_shader.initialize(raster_modes);
 		resolve_shader_version = resolve_shader.version_create();
 		Vector<String> tiles_modes;
@@ -348,6 +352,21 @@ void VirtualGeometryEffect::begin_software_raster(const Size2i &p_size, uint32_t
 		uniforms.push_back(u_entries);
 		raster_frame_uniform_set = rd->uniform_set_create(uniforms, raster_shader.version_get_shader(raster_shader_version, 0), 1);
 	}
+}
+
+RID VirtualGeometryEffect::create_shadow_raster_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_page_buffer, RID p_page_table_buffer) const {
+	Vector<RD::Uniform> uniforms;
+	const RID buffers[4] = { p_cluster_buffer, p_command_buffer, p_page_buffer, p_page_table_buffer };
+	for (uint32_t i = 0; i < 4; i++) {
+		RD::Uniform u(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, buffers[i]);
+		uniforms.push_back(u);
+	}
+	return RD::get_singleton()->uniform_set_create(uniforms, const_cast<VirtualGeometryRasterShaderRD &>(raster_shader).version_get_shader(raster_shader_version, 1), 0);
+}
+
+RID VirtualGeometryEffect::get_shadow_raster_frame_uniform_set(RID p_buffer) {
+	RD::Uniform u(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_buffer);
+	return UniformSetCacheRD::get_singleton()->get_cache(raster_shader.version_get_shader(raster_shader_version, 1), 1, u);
 }
 
 RID VirtualGeometryEffect::create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_page_buffer, RID p_page_table_buffer) const {

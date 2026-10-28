@@ -3781,6 +3781,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/virtual_geometry/debug/collect_statistics", false);
 	GLOBAL_DEF("rendering/virtual_geometry/occlusion_culling", true);
 	GLOBAL_DEF("rendering/virtual_geometry/shadow_window_culling", true);
+	GLOBAL_DEF("rendering/virtual_geometry/shadow_compute_raster", true);
 	GLOBAL_DEF_RST("rendering/virtual_shadows/enabled", false);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/max_physical_pages", PROPERTY_HINT_RANGE, "256,8192,1"), 2048);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/windows_per_frame", PROPERTY_HINT_RANGE, "1,64,1"), 16);

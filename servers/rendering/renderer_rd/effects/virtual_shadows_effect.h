@@ -114,6 +114,8 @@ private:
 	RID copy_buffer;
 	RID mark_params_buffer;
 	RID spot_params_buffer;
+	RID shadow_raster_buffer; // Depth bits rasterized by compute per scratch window slot, merged by the copy pass.
+	uint32_t rastered_mask = 0;
 
 	// Readback of page requests.
 	Vector<uint32_t> requests;
@@ -206,6 +208,9 @@ public:
 	const Stats &get_stats() const { return stats; }
 	const Stats &get_last_stats() const { return last_stats; }
 	uint32_t get_pool_pages() const { return pool_pages; }
+	RID get_shadow_raster_buffer() const { return shadow_raster_buffer; }
+	uint32_t window_slot(const Rect2i &p_rect) const { return p_rect.position.x / WINDOW_TEXELS + p_rect.position.y / WINDOW_TEXELS * scratch_cols; }
+	void begin_window_raster(uint32_t p_slot);
 	uint32_t get_resident_pages() const { return pool_pages - free_list.size(); }
 
 	VirtualShadowsEffect();

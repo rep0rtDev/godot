@@ -105,6 +105,20 @@ copies;
 
 layout(set = 0, binding = 2, r32f) uniform restrict writeonly image2D pool;
 
+// Depth bits rasterized by compute for virtual geometry, [window slot][window_texels][window_texels].
+layout(set = 0, binding = 3, std430) restrict readonly buffer ShadowRaster {
+	uint data[];
+}
+shadow_raster;
+
+layout(push_constant, std430) uniform Params {
+	uint rastered_mask; // Scratch window slots that have compute-rasterized depth this frame.
+	uint scratch_cols;
+	uint window_texels;
+	uint pad;
+}
+params;
+
 void main() {
 	uvec4 c = copies.data[gl_GlobalInvocationID.z];
 	ivec2 t = ivec2(gl_GlobalInvocationID.xy);
@@ -112,6 +126,13 @@ void main() {
 		return;
 	}
 	float d = texelFetch(scratch_depth, ivec2(c.xy) + t, 0).r;
+	uvec2 src = c.xy + uvec2(t);
+	uvec2 window = src / params.window_texels;
+	uint slot = window.x + window.y * params.scratch_cols;
+	if ((params.rastered_mask & (1u << slot)) != 0u) {
+		uvec2 l = src - window * params.window_texels;
+		d = max(d, uintBitsToFloat(shadow_raster.data[(slot * params.window_texels + l.y) * params.window_texels + l.x]));
+	}
 	imageStore(pool, ivec2(c.zw) + t, vec4(d));
 }
 

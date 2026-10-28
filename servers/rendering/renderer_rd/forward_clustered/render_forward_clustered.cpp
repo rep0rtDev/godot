@@ -627,6 +627,8 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					WARN_PRINT("Indirect draws are not supported when emulating point size.");
 				}
 				RD::get_singleton()->draw_list_draw(draw_list, false, mesh_storage->mesh_surface_get_vertex_count(mesh_surface), instance_count * 6);
+			} else if (use_virtual_geometry && p_params->vg_window_rastered) {
+				// Already rasterized into the virtual shadow window by compute.
 			} else if (use_virtual_geometry) {
 				// Camera-facing passes use the frustum-culled range; shadow and auxiliary passes the LOD-only range.
 				const bool camera_range = p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI;
@@ -3422,6 +3424,7 @@ void RenderForwardClustered::_render_shadow_end() {
 		if (shadow_pass.vg_window_range >= 0) {
 			_virtual_geometry_select_window(shadow_pass);
 			render_list_parameters.vg_window_range = shadow_pass.vg_window_range;
+			render_list_parameters.vg_window_rastered = _virtual_geometry_raster_window(shadow_pass);
 		}
 		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
 	}
@@ -4774,6 +4777,10 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 		RD::get_singleton()->free_rid(p_surface->vg_raster_uniform_set);
 	}
 	p_surface->vg_raster_uniform_set = RID();
+	if (p_surface->vg_shadow_raster_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_shadow_raster_uniform_set)) {
+		RD::get_singleton()->free_rid(p_surface->vg_shadow_raster_uniform_set);
+	}
+	p_surface->vg_shadow_raster_uniform_set = RID();
 	if (p_surface->vg_pull_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_pull_uniform_set)) {
 		RD::get_singleton()->free_rid(p_surface->vg_pull_uniform_set);
 	}
@@ -4892,6 +4899,58 @@ void RenderForwardClustered::_virtual_geometry_select_window(const SceneState::S
 		RD::get_singleton()->compute_list_dispatch(compute_list, Math::division_round_up(surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::GROUP_SIZE), 1, 1);
 	}
 	RD::get_singleton()->compute_list_end();
+}
+
+bool RenderForwardClustered::_virtual_geometry_raster_window(const SceneState::ShadowPass &p_pass) {
+	if (!virtual_geometry || !virtual_geometry->uses_shadow_raster() || !virtual_shadows || p_pass.vg_window_range < 0) {
+		return false;
+	}
+	LocalVector<GeometryInstanceSurfaceDataCache *> surfaces;
+	HashSet<GeometryInstanceSurfaceDataCache *> seen;
+	for (uint32_t i = 0; i < p_pass.element_count; i++) {
+		GeometryInstanceSurfaceDataCache *surf = render_list[RENDER_LIST_SECONDARY].elements[p_pass.element_from + i];
+		if (surf->vg_cluster_count == 0 || !surf->vg_command_buffer.is_valid() || seen.has(surf)) {
+			continue;
+		}
+		if (!surf->vg_shadow_raster_uniform_set.is_valid()) {
+			return false; // Some cluster surface cannot be rasterized here; the window keeps drawing them all.
+		}
+		seen.insert(surf);
+		surfaces.push_back(surf);
+	}
+	if (surfaces.is_empty()) {
+		return false;
+	}
+	const uint32_t slot = virtual_shadows->window_slot(p_pass.rect);
+	virtual_shadows->begin_window_raster(slot);
+	const uint32_t range = RendererRD::VirtualGeometryEffect::WINDOW_RANGE_FIRST + p_pass.vg_window_range;
+	Projection correction;
+	correction.set_depth_correction(false);
+	const Projection projection = correction * p_pass.vg_window_projection;
+	const Transform3D view = p_pass.vg_window_transform.affine_inverse();
+	RendererRD::VirtualGeometryEffect::RasterPushConstant push_constant = {};
+	push_constant.size[0] = RendererRD::VirtualShadowsEffect::WINDOW_TEXELS;
+	push_constant.size[1] = RendererRD::VirtualShadowsEffect::WINDOW_TEXELS;
+	push_constant.entry_capacity = range; // Index of the range's count in the command buffer header.
+	push_constant.flags = virtual_geometry->uses_indirect_count() ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_COMPACT : 0;
+	push_constant.pad[0] = slot * RendererRD::VirtualShadowsEffect::WINDOW_TEXELS * RendererRD::VirtualShadowsEffect::WINDOW_TEXELS;
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, virtual_geometry->get_shadow_raster_pipeline());
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, virtual_geometry->get_shadow_raster_frame_uniform_set(virtual_shadows->get_shadow_raster_buffer()), 1);
+	for (GeometryInstanceSurfaceDataCache *surf : surfaces) {
+		const Projection mvp = projection * Projection(view * surf->owner->transform);
+		for (int c = 0; c < 4; c++) {
+			for (int r = 0; r < 4; r++) {
+				push_constant.model_view_projection[c * 4 + r] = mvp.columns[c][r];
+			}
+		}
+		push_constant.list_offset = (RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * surf->vg_cluster_count * RendererRD::VirtualGeometryEffect::COMMAND_STRIDE) / sizeof(uint32_t);
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, surf->vg_shadow_raster_uniform_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		RD::get_singleton()->compute_list_dispatch(compute_list, surf->vg_cluster_count, 1, 1);
+	}
+	RD::get_singleton()->compute_list_end();
+	return true;
 }
 
 void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_render_data, bool p_occlusion, bool p_software) {
@@ -5282,6 +5341,9 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 			const RID vg_page_table_buffer = mesh_storage->mesh_surface_get_vg_page_table_buffer(sdcache->surface);
 			if (virtual_geometry->uses_software_raster()) {
 				sdcache->vg_raster_uniform_set = virtual_geometry->create_raster_uniform_set(vg_cluster_buffer, sdcache->vg_work_buffer, vg_page_buffer, vg_page_table_buffer);
+			}
+			if (virtual_geometry->uses_shadow_raster() && vg_page_buffer.is_valid() && vg_page_table_buffer.is_valid()) {
+				sdcache->vg_shadow_raster_uniform_set = virtual_geometry->create_shadow_raster_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, vg_page_buffer, vg_page_table_buffer);
 			}
 			// Hardware raster pulls vertices from the pages through set 4; without a fifth set the full mesh is drawn instead.
 			if (RD::get_singleton()->limit_get(RD::LIMIT_MAX_BOUND_UNIFORM_SETS) > 4 && scene_shader.default_material_shader_ptr) {

@@ -102,6 +102,7 @@ VirtualShadowsEffect::VirtualShadowsEffect() {
 		tf.height = ((windows_per_frame + scratch_cols - 1) / scratch_cols) * WINDOW_TEXELS;
 		tf.usage_bits = LightStorage::get_shadow_atlas_depth_usage_bits() | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		scratch_depth = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		shadow_raster_buffer = RD::get_singleton()->storage_buffer_create(uint64_t(windows_per_frame) * WINDOW_TEXELS * WINDOW_TEXELS * sizeof(uint32_t));
 		Vector<RID> fb;
 		fb.push_back(scratch_depth);
 		scratch_fb = RD::get_singleton()->framebuffer_create(fb);
@@ -127,6 +128,9 @@ VirtualShadowsEffect::VirtualShadowsEffect() {
 }
 
 VirtualShadowsEffect::~VirtualShadowsEffect() {
+	if (shadow_raster_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(shadow_raster_buffer);
+	}
 	for (RID rid : { pool_texture, scratch_fb, scratch_depth, page_table_buffer, request_buffer, copy_buffer, mark_params_buffer, spot_params_buffer }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
@@ -144,6 +148,7 @@ void VirtualShadowsEffect::begin_frame(uint64_t p_frame) {
 	copies.clear();
 	last_stats = stats;
 	stats = Stats();
+	rastered_mask = 0;
 	requests_ready = have_requests;
 	have_requests = false;
 	// Spot lights that stopped casting shadows give their slot back.
@@ -644,6 +649,12 @@ bool VirtualShadowsEffect::window_touches(const Window &p_window, const AABB &p_
 	return Rect2(u0, v0, size, size).intersects(ndc);
 }
 
+void VirtualShadowsEffect::begin_window_raster(uint32_t p_slot) {
+	ERR_FAIL_COND(p_slot >= windows_per_frame);
+	RD::get_singleton()->buffer_clear(shadow_raster_buffer, uint64_t(p_slot) * WINDOW_TEXELS * WINDOW_TEXELS * sizeof(uint32_t), WINDOW_TEXELS * WINDOW_TEXELS * sizeof(uint32_t));
+	rastered_mask |= 1u << p_slot;
+}
+
 void VirtualShadowsEffect::copy_pages() {
 	if (!enabled) {
 		return;
@@ -659,10 +670,13 @@ void VirtualShadowsEffect::copy_pages() {
 		RD::Uniform u_src(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { sampler, scratch_depth });
 		RD::Uniform u_copies(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, copy_buffer);
 		RD::Uniform u_pool(RD::UNIFORM_TYPE_IMAGE, 2, pool_texture);
-		RID set = UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 0, u_src, u_copies, u_pool);
+		RD::Uniform u_raster(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, shadow_raster_buffer);
+		RID set = UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 0, u_src, u_copies, u_pool, u_raster);
+		const uint32_t copy_params[4] = { rastered_mask, scratch_cols, WINDOW_TEXELS, 0 };
 		RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[MODE_COPY]);
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(compute_list, copy_params, sizeof(copy_params));
 		RD::get_singleton()->compute_list_dispatch(compute_list, TEXELS / 8, TEXELS / 8, copies.size() / 4);
 		RD::get_singleton()->compute_list_end();
 	}

@@ -247,6 +247,7 @@ private:
 		uint32_t vg_phase = 0;
 		// Virtual shadow window whose culled cluster range replaces the LOD-only shadow range, or -1.
 		int32_t vg_window_range = -1;
+		bool vg_window_rastered = false; // Virtual geometry already rasterized into the window by compute; skip its draws.
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -586,6 +587,7 @@ private:
 		RID vg_instance_uniform_set;
 		// Compute rasterization of small clusters: reads this surface's positions and indices.
 		RID vg_raster_uniform_set;
+		RID vg_shadow_raster_uniform_set; // Compute raster into virtual shadow windows from the window command ranges.
 		uint32_t vg_raster_flags = 0;
 		RID vg_pull_uniform_set; // Set 4 of the hardware raster: clusters, pages and the surface params.
 		// Material pass straight from the visibility buffer (uniform set 4) and its per-surface parameters.
@@ -857,6 +859,7 @@ private:
 	int32_t vsm_window_range_next = -1;
 	uint32_t vsm_window_ranges_used = 0;
 	void _virtual_geometry_select_window(const SceneState::ShadowPass &p_pass);
+	bool _virtual_geometry_raster_window(const SceneState::ShadowPass &p_pass);
 	void _render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, const Rect2i &p_rect = Rect2i(), bool p_flip_y = false, bool p_clear_region = true, bool p_begin = true, bool p_end = true, RenderingServerTypes::RenderInfo *p_render_info = nullptr, const Size2i &p_viewport_size = Size2i(1, 1), const Transform3D &p_main_cam_transform = Transform3D());
 	void _render_shadow_process();
 	void _render_shadow_end();
