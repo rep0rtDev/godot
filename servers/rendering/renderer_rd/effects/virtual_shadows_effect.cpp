@@ -203,6 +203,7 @@ void VirtualShadowsEffect::_free_entry(uint32_t p_entry) {
 	phys_entry.write[phys] = UINT32_MAX;
 	free_list.push_back(phys);
 	table_dirty = true;
+	level_dirty[p_entry / ENTRIES_PER_LEVEL] = true;
 }
 
 void VirtualShadowsEffect::_invalidate_all() {
@@ -234,7 +235,7 @@ int32_t VirtualShadowsEffect::_alloc_page() {
 	return victim;
 }
 
-bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p_cascade_transform, float p_cascade_zfar, float p_normal_bias, const LocalVector<AABB> &p_moved) {
+bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p_cascade_transform, float p_cascade_zfar, float p_normal_bias, const LocalVector<AABB> &p_invalidate) {
 	if (!enabled) {
 		return false;
 	}
@@ -264,14 +265,10 @@ bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p
 		light_valid = true;
 	}
 
-	// Moving instances: every page their bounds touch is rendered again.
-	for (const AABB &aabb : p_moved) {
-		Vector2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
-		for (int c = 0; c < 8; c++) {
-			const Vector2 l = _light_xy(aabb.get_endpoint(c));
-			lo = lo.min(l);
-			hi = hi.max(l);
-		}
+	// Casters that moved, appeared or disappeared: every page their bounds touch is rendered again.
+	for (const AABB &aabb : p_invalidate) {
+		const Rect2 r = get_light_rect(aabb);
+		const Vector2 lo = r.position, hi = r.get_end();
 		for (uint32_t level = 0; level < LEVELS; level++) {
 			const float ps = _page_size(level);
 			const int64_t x0 = int64_t(Math::floor(lo.x / ps)), x1 = int64_t(Math::floor(hi.x / ps));
@@ -368,6 +365,7 @@ bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p
 		phys_entry.write[phys] = n.entry;
 		phys_last_used.write[phys] = frame;
 		table_dirty = true;
+		level_dirty[n.level] = true;
 		const Window &win = windows[*slot];
 		copies.push_back(win.rect.position.x + (n.x - win.wx * WINDOW_PAGES) * TEXELS);
 		copies.push_back(win.rect.position.y + (n.y - win.wy * WINDOW_PAGES) * TEXELS); // Window row 0 is the smallest light-space y.
@@ -377,6 +375,21 @@ bool VirtualShadowsEffect::plan_light(RID p_light_instance, const Transform3D &p
 	}
 	have_requests = false;
 	return true;
+}
+
+Rect2 VirtualShadowsEffect::get_light_rect(const AABB &p_aabb) const {
+	Vector2 lo(FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX);
+	for (int c = 0; c < 8; c++) {
+		const Vector2 l = _light_xy(p_aabb.get_endpoint(c));
+		lo = lo.min(l);
+		hi = hi.max(l);
+	}
+	return Rect2(lo, hi - lo);
+}
+
+Rect2 VirtualShadowsEffect::get_window_light_rect(const Window &p_window) const {
+	const float extent = _page_size(p_window.level) * WINDOW_PAGES;
+	return Rect2(Vector2(p_window.wx, p_window.wy) * extent, Vector2(extent, extent));
 }
 
 Projection VirtualShadowsEffect::get_window_projection(const Window &p_window) const {
@@ -421,7 +434,13 @@ void VirtualShadowsEffect::copy_pages() {
 	}
 	if (table_dirty) {
 		table_dirty = false;
-		RD::get_singleton()->buffer_update(page_table_buffer, 0, table.size() * sizeof(uint32_t), table.ptr());
+		for (uint32_t level = 0; level < LEVELS; level++) {
+			if (level_dirty[level]) {
+				level_dirty[level] = false;
+				const uint64_t offset = uint64_t(level) * ENTRIES_PER_LEVEL * 2 * sizeof(uint32_t);
+				RD::get_singleton()->buffer_update(page_table_buffer, offset, ENTRIES_PER_LEVEL * 2 * sizeof(uint32_t), table.ptr() + uint64_t(level) * ENTRIES_PER_LEVEL * 2);
+			}
+		}
 	}
 }
 

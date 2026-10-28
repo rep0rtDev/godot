@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/math/projection.h"
+#include "core/math/rect2.h"
 #include "core/templates/local_vector.h"
 #include "servers/rendering/renderer_rd/shaders/effects/virtual_shadows.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.h"
@@ -114,6 +115,7 @@ private:
 	Vector<uint32_t> entry_key;
 	Vector<uint8_t> entry_valid;
 	bool table_dirty = false;
+	bool level_dirty[LEVELS] = {};
 	Vector<uint32_t> phys_entry;
 	Vector<uint64_t> phys_last_used;
 	LocalVector<uint32_t> free_list;
@@ -157,7 +159,10 @@ public:
 	void mark(RID p_depth, const RenderSceneDataRD &p_scene_data, const Size2i &p_size);
 	// Decides which windows to render this frame for the light and allocates their pages; false when this light is not
 	// handled (only the first shadowed directional light is).
-	bool plan_light(RID p_light_instance, const Transform3D &p_cascade_transform, float p_cascade_zfar, float p_normal_bias, const LocalVector<AABB> &p_moved);
+	bool plan_light(RID p_light_instance, const Transform3D &p_cascade_transform, float p_cascade_zfar, float p_normal_bias, const LocalVector<AABB> &p_invalidate);
+	// Light-space (xy) extents, for culling casters against windows.
+	Rect2 get_light_rect(const AABB &p_aabb) const;
+	Rect2 get_window_light_rect(const Window &p_window) const;
 	const LocalVector<Window> &get_windows() const { return windows; }
 	Projection get_window_projection(const Window &p_window) const;
 	Transform3D get_window_transform(const Window &p_window) const;

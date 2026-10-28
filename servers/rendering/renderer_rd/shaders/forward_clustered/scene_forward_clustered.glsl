@@ -1423,11 +1423,9 @@ bool vsm_directional_shadow(uint i, vec3 world, float view_z, float proj_y, floa
 		r_shadow = lit / 9.0;
 		return true;
 	}
-	if (info.w != 0u) {
-		r_shadow = info.w == 1u ? 1.0 : 0.0;
-		return true;
-	}
-	return false;
+	// No page yet (first frames after a jump): lit, the regular shadow map is not rendered for this light.
+	r_shadow = (info.w == 0u || info.w == 1u) ? 1.0 : 0.0;
+	return true;
 }
 
 void fragment_shader(in SceneData scene_data) {
