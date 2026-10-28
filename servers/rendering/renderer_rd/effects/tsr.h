@@ -49,12 +49,14 @@ public:
 		Size2i target_size;
 		Vector2 jitter; // Internal pixels.
 		float sharpness = 0.0f;
+		float reactive = 1.0f; // Weight of the transparency reactive mask (needs copy_opaque before the transparent pass).
 		Projection reprojection; // Clip space of this frame to clip space of the previous one, for static geometry.
 	};
 
 	TSREffect();
 	~TSREffect();
 
+	void copy_opaque(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_color, Size2i p_internal_size, RD::DataFormat p_format);
 	void process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parameters &p_params);
 
 private:
@@ -65,6 +67,8 @@ private:
 		float reset;
 		float sharpness;
 		float reprojection[16];
+		float reactive;
+		float pad[3];
 	};
 
 	TsrShaderRD shader;

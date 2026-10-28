@@ -30,6 +30,7 @@
 
 #include "tsr.h"
 
+#include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -55,6 +56,16 @@ TSREffect::~TSREffect() {
 	shader.version_free(shader_version);
 }
 
+void TSREffect::copy_opaque(Ref<RenderSceneBuffersRD> p_render_buffers, RID p_color, Size2i p_internal_size, RD::DataFormat p_format) {
+	static const StringName context = SNAME("TSR");
+	static const StringName name = SNAME("opaque");
+	if (!p_render_buffers->has_texture(context, name)) {
+		p_render_buffers->create_texture(context, name, p_format, RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT, RD::TEXTURE_SAMPLES_1, p_internal_size);
+	}
+	// The internal colour texture cannot be copied with texture_copy (no CAN_COPY_FROM), so go through the copy shader.
+	CopyEffects::get_singleton()->copy_to_rect(p_color, p_render_buffers->get_texture(context, name), Rect2i(Point2i(), p_internal_size));
+}
+
 void TSREffect::process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parameters &p_params) {
 	static const StringName context = SNAME("TSR");
 	static const StringName names[2] = { SNAME("history0"), SNAME("history1") };
@@ -78,7 +89,10 @@ void TSREffect::process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parame
 	RD::Uniform u_history(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ linear_sampler, history_in }));
 	RD::Uniform u_output(RD::UNIFORM_TYPE_IMAGE, 4, Vector<RID>({ p_params.output }));
 	RD::Uniform u_history_out(RD::UNIFORM_TYPE_IMAGE, 5, Vector<RID>({ history_out }));
-	RID uniform_set = cache->get_cache(shader_rid, 0, u_color, u_depth, u_velocity, u_history, u_output, u_history_out);
+	static const StringName opaque_name = SNAME("opaque");
+	bool has_opaque = p_render_buffers->has_texture(context, opaque_name);
+	RD::Uniform u_opaque(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ linear_sampler, has_opaque ? p_render_buffers->get_texture(context, opaque_name) : p_params.color }));
+	RID uniform_set = cache->get_cache(shader_rid, 0, u_color, u_depth, u_velocity, u_history, u_output, u_history_out, u_opaque);
 
 	PushConstant pc;
 	pc.internal_size[0] = p_params.internal_size.x;
@@ -90,6 +104,7 @@ void TSREffect::process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parame
 	pc.reset = reset ? 1.0f : 0.0f;
 	pc.sharpness = p_params.sharpness;
 	RendererRD::MaterialStorage::store_camera(p_params.reprojection, pc.reprojection);
+	pc.reactive = has_opaque ? p_params.reactive : 0.0f;
 
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, pipeline);
@@ -102,7 +117,7 @@ void TSREffect::process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parame
 		RID sharpen_shader = shader.version_get_shader(shader_version, 1);
 		RD::Uniform u_accum(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ linear_sampler, history_out }));
 		RD::Uniform u_unused(RD::UNIFORM_TYPE_IMAGE, 5, Vector<RID>({ history_in }));
-		RID sharpen_set = cache->get_cache(sharpen_shader, 0, u_accum, u_depth, u_velocity, u_history, u_output, u_unused);
+		RID sharpen_set = cache->get_cache(sharpen_shader, 0, u_accum, u_depth, u_velocity, u_history, u_output, u_unused, u_opaque);
 		RD::get_singleton()->compute_list_bind_compute_pipeline(cl, pipeline_sharpen);
 		RD::get_singleton()->compute_list_bind_uniform_set(cl, sharpen_set, 0);
 		RD::get_singleton()->compute_list_set_push_constant(cl, &pc, sizeof(pc));

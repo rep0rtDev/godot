@@ -2709,6 +2709,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		_process_compositor_effects(RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT, p_render_data);
 	}
 
+	if (scale_type == SCALE_TSR && !is_reflection_probe && GLOBAL_GET_CACHED(bool, "rendering/scaling_3d/tsr_reactive")) {
+		tsr_effect->copy_opaque(rb, rb->get_internal_texture(0), rb->get_internal_size(), rb->get_base_data_format());
+	}
+
 	RENDER_TIMESTAMP("Render 3D Transparent Pass");
 
 	RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
@@ -2786,6 +2790,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				params.target_size = rb->get_target_size();
 				params.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
 				params.sharpness = rb->get_fsr_sharpness();
+				params.reactive = GLOBAL_GET_CACHED(bool, "rendering/scaling_3d/tsr_reactive") ? 1.0f : 0.0f;
 
 				Projection correction;
 				correction.set_depth_correction(true, true, false);

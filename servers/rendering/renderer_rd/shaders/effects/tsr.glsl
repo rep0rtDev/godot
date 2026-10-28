@@ -15,7 +15,8 @@ layout(set = 0, binding = 1) uniform sampler2D depth_buffer; // Internal size, r
 layout(rg16f, set = 0, binding = 2) uniform restrict readonly image2D velocity_buffer; // Internal size, uv units.
 layout(set = 0, binding = 3) uniform sampler2D history_buffer; // Target size, rgb colour, a = frames / 16.
 layout(rgba16f, set = 0, binding = 4) uniform restrict writeonly image2D output_buffer; // Target size.
-layout(rgba16f, set = 0, binding = 5) uniform restrict writeonly image2D history_out; // Target size.
+layout(rgba16f, set = 0, binding = 5) uniform restrict writeonly image2D history_out;
+layout(set = 0, binding = 6) uniform sampler2D opaque_buffer; // Internal size, colour before the transparent pass. // Target size.
 
 layout(push_constant, std430) uniform Params {
 	vec2 internal_size;
@@ -24,6 +25,10 @@ layout(push_constant, std430) uniform Params {
 	float reset; // 1 drops the history.
 	float sharpness;
 	mat4 reprojection;
+	float reactive;
+	float pad0;
+	float pad1;
+	float pad2;
 }
 params;
 
@@ -184,8 +189,11 @@ void main() {
 	// A jittered sample far from this output pixel carries little information: weight it by the kernel sum.
 	float conf = clamp(current_w, 0.05, 1.0);
 	float alpha = conf / (frames + conf);
+	// Transparent surfaces have no motion vectors and no depth: where they changed the colour, trust the current frame.
+	float reactive = params.reactive * clamp(length(reinhard(texelFetch(color_buffer, src_pixel, 0).rgb) - reinhard(texelFetch(opaque_buffer, src_pixel, 0).rgb)) * 4.0, 0.0, 1.0);
+	alpha = max(alpha, reactive);
 	vec3 result = mix(hist, current, alpha);
-	frames = min(frames + conf, 16.0);
+	frames = min(frames + conf, 16.0) * (1.0 - reactive);
 	vec3 out_rgb = reinhard_inverse(result);
 	imageStore(history_out, pixel, vec4(out_rgb, frames / 16.0));
 	imageStore(output_buffer, pixel, vec4(out_rgb, 1.0));
