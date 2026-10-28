@@ -51,7 +51,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		return;
 	}
 	debug_mode = GLOBAL_GET("rendering/global_illumination/surface_cache/debug/mode");
-	light_debug = debug_mode == 7 ? 1 : (debug_mode == 10 ? 2 : (debug_mode == 11 ? 3 : 0));
+	light_debug = debug_mode == 7 ? 1 : (debug_mode == 10 ? 2 : (debug_mode == 11 || debug_mode == 14 ? 3 : 0));
 	screen_probes = GLOBAL_GET("rendering/global_illumination/surface_cache/screen_probes");
 	atlas_size = GLOBAL_GET("rendering/global_illumination/surface_cache/atlas_size");
 	cards_per_frame = GLOBAL_GET("rendering/global_illumination/surface_cache/cards_per_frame");

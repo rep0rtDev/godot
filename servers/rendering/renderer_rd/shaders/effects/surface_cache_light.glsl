@@ -225,6 +225,7 @@ bool sdf_trace(vec3 origin, vec3 dir, float max_dist, out vec3 r_hit, out int r_
 	// away from any surface, so grazing rays do not hit their own surface.
 	float t = 1.0 / sdf.cascades[j].w;
 	bool left_surface = false;
+	int prev_j = j;
 	for (int i = 0; i < 96 && t < max_dist; i++) {
 		vec3 p = origin + dir * t;
 		j = find_cascade(p);
@@ -232,6 +233,12 @@ bool sdf_trace(vec3 origin, vec3 dir, float max_dist, out vec3 r_hit, out int r_
 			return false;
 		}
 		float d = sdf_sample(p, j);
+		// Distances are in cells of the current cascade: a ray that left its surface by one fine cell is still
+		// inside half a coarse cell, so the test restarts after a cascade change or grazing rays hit their own surface.
+		if (j != prev_j) {
+			left_surface = false;
+			prev_j = j;
+		}
 		left_surface = left_surface || d >= 1.0;
 		if (d < 0.5 && left_surface) {
 			r_hit = p;
@@ -464,12 +471,20 @@ void main() {
 	vec3 hit;
 	int cascade;
 	vec3 radiance = sky_radiance(dir);
-	if (sdf_trace(origin, dir, 200.0, hit, cascade)) {
+	bool found = false;
+	bool hit_any = sdf_trace(origin, dir, 200.0, hit, cascade);
+	if (hit_any) {
 		vec3 hn = sdf_normal(hit, cascade);
 		float cell_size = 1.0 / sdf.cascades[cascade].w;
-		if (!sample_cards(hit, hn, 1.5 * cell_size, radiance)) {
+		found = sample_cards(hit, hn, 1.5 * cell_size, radiance);
+		if (!found) {
 			radiance = vec3(0.0);
 		}
+	}
+	if (push.debug == 3u) {
+		// Diagnostics: hit cascade (+1)/8, hit distance/32, card found, hit height (+8)/16 in alpha.
+		imageStore(reflection_image, local, vec4(hit_any ? float(cascade + 1) / 8.0 : 0.0, hit_any ? length(hit - origin) / 32.0 : 1.0, found ? 1.0 : 0.0, hit_any ? (hit.y + 8.0) / 16.0 : 0.0));
+		return;
 	}
 	float depth = -view_pos.z;
 	vec4 prev = imageLoad(reflection_history, local);
