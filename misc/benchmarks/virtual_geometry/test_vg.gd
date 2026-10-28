@@ -89,7 +89,8 @@ func _init() -> void:
 	var dependency_count := buf.decode_u32(16)
 	var data_size := buf.decode_u32(20)
 	var page_table := HEADER + (n + node_count) * 64
-	var page_data_offset := page_table + page_count * 16 + dependency_count * 4
+	var children_offset := page_table + page_count * 16 + dependency_count * 4
+	var page_data_offset := children_offset + n * 4
 	if buf.size() != page_data_offset + data_size:
 		print("FAIL: vg data size mismatch")
 		quit(1)
@@ -117,6 +118,25 @@ func _init() -> void:
 				print("FAIL: page %d depends on later page %d" % [pg, dep]); failures += 1
 	if expect_offset != data_size:
 		print("FAIL: pages do not cover the page data"); failures += 1
+	# Children ranges: leaves have none, others point at a valid range of finer clusters whose parent error is this cluster's self error.
+	var with_children := 0
+	for i in n:
+		var ch := buf.decode_u32(children_offset + i * 4)
+		if ch == 0xFFFFFFFF:
+			continue
+		with_children += 1
+		var first := ch >> 8
+		var cnt := ch & 0xFF
+		if cnt == 0 or first + cnt > n:
+			print("FAIL: bad children range of cluster %d" % i); failures += 1
+			continue
+		var self_error := buf.decode_float(HEADER + i * 64 + 48)
+		for k in range(first, first + cnt):
+			if abs(buf.decode_float(HEADER + k * 64 + 52) - self_error) > 1e-6 * max(1.0, self_error):
+				print("FAIL: child %d of cluster %d has a different parent error" % [k, i]); failures += 1
+				break
+	if with_children == 0:
+		print("FAIL: no cluster has children"); failures += 1
 	# Decoded cluster geometry: every quantized vertex snaps to a source vertex, so cuts can be checked by position.
 	var grid := {}
 	for v in verts.size():

@@ -145,14 +145,17 @@ public:
 	static constexpr uint32_t GEOMETRY_FLAG_UV2 = 4;
 	static constexpr uint32_t GEOMETRY_FLAG_COLOR = 8;
 
-	// Layout: header, clusters, nodes, pages, page dependencies (uint32), page data.
+	// Layout: header, clusters, nodes, pages, page dependencies (uint32), cluster children (uint32), page data.
+	// Children of a cluster: (first << 8) | count of the finer clusters it was simplified from, NO_CHILDREN for leaves.
+	static constexpr uint32_t NO_CHILDREN = 0xFFFFFFFF;
 	static Vector<uint8_t> pack(const VirtualGeometryBuildResult &p_result, const VirtualGeometryAttributes &p_attributes);
 	// Validates serialized data; returns false for malformed or old-format data.
 	static bool unpack_header(const Vector<uint8_t> &p_data, VirtualGeometryHeader &r_header);
 	static bool unpack_header(const Vector<uint8_t> &p_data, uint32_t &r_cluster_count, uint32_t &r_node_count);
 	static uint32_t get_page_table_offset(const VirtualGeometryHeader &p_header) { return get_node_data_offset(p_header.cluster_count) + p_header.node_count * sizeof(VirtualGeometryNode); }
 	static uint32_t get_dependency_offset(const VirtualGeometryHeader &p_header) { return get_page_table_offset(p_header) + p_header.page_count * sizeof(VirtualGeometryPage); }
-	static uint32_t get_page_data_offset(const VirtualGeometryHeader &p_header) { return get_dependency_offset(p_header) + p_header.dependency_count * sizeof(uint32_t); }
+	static uint32_t get_children_offset(const VirtualGeometryHeader &p_header) { return get_dependency_offset(p_header) + p_header.dependency_count * sizeof(uint32_t); }
+	static uint32_t get_page_data_offset(const VirtualGeometryHeader &p_header) { return get_children_offset(p_header) + p_header.cluster_count * sizeof(uint32_t); }
 	// Decodes one cluster of the page data back into triangles (tests and CPU fallbacks).
 	static bool decode_cluster(const uint8_t *p_page_data, uint32_t p_geometry_offset, Vector<Vector3> &r_positions, Vector<int> &r_indices);
 	static uint32_t get_cluster_data_offset() { return sizeof(VirtualGeometryHeader); }

@@ -37,6 +37,7 @@
 #include "core/templates/hash_map.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/local_vector.h"
+#include "core/templates/pair.h"
 #include "core/templates/sort_array.h"
 
 VirtualGeometry::BuildFunc VirtualGeometry::build_func = nullptr;
@@ -265,6 +266,34 @@ Vector<uint8_t> VirtualGeometry::pack(const VirtualGeometryBuildResult &p_result
 			}
 		}
 	}
+	// Children: the clusters simplified into a group are contiguous in hierarchy order (one leaf node per group).
+	HashMap<int32_t, Pair<uint32_t, uint32_t>> part_range;
+	for (uint32_t ci = 0; ci < cluster_count; ci++) {
+		const int32_t part = p_result.cluster_part[ci];
+		if (part < 0) {
+			continue;
+		}
+		if (!part_range.has(part)) {
+			part_range[part] = Pair<uint32_t, uint32_t>(ci, 1);
+		} else {
+			Pair<uint32_t, uint32_t> &range = part_range[part];
+			ERR_FAIL_COND_V(range.first + range.second != ci, Vector<uint8_t>());
+			range.second++;
+		}
+	}
+	Vector<uint32_t> children;
+	children.resize(cluster_count);
+	for (uint32_t ci = 0; ci < cluster_count; ci++) {
+		const int32_t source = p_result.cluster_source_part[ci];
+		uint32_t value = NO_CHILDREN;
+		if (source >= 0 && part_range.has(source)) {
+			const Pair<uint32_t, uint32_t> &range = part_range[source];
+			ERR_FAIL_COND_V(range.second > 255 || range.first >= (1u << 24), Vector<uint8_t>());
+			value = (range.first << 8) | range.second;
+		}
+		children.write[ci] = value;
+	}
+
 	Vector<uint32_t> dependencies;
 	for (int pg = 0; pg < pages.size(); pg++) {
 		pages.write[pg].dependency_first = dependencies.size();
@@ -291,6 +320,7 @@ Vector<uint8_t> VirtualGeometry::pack(const VirtualGeometryBuildResult &p_result
 	if (dependencies.size()) {
 		memcpy(w + get_dependency_offset(header), dependencies.ptr(), dependencies.size() * sizeof(uint32_t));
 	}
+	memcpy(w + get_children_offset(header), children.ptr(), cluster_count * sizeof(uint32_t));
 	memcpy(w + get_page_data_offset(header), page_data.ptr(), page_data.size());
 	return data;
 }
