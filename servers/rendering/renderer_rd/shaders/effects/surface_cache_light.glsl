@@ -116,7 +116,7 @@ vec3 sky_radiance(vec3 dir) {
 	return params.sky.rgb;
 }
 
-#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE) || defined(MODE_SCREEN_REFLECT)
+#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE) || defined(MODE_SCREEN_REFLECT) || defined(MODE_RADIANCE_PROBES)
 // Screen probes: one per SCREEN_PROBE_SIZE pixels, cosine rays through the SDF into the surface cache, resolved into
 // the GI ambient buffer the forward pass already reads.
 #define SCREEN_PROBE_SIZE 16
@@ -136,8 +136,79 @@ layout(set = 2, binding = 4, std140) uniform Screen {
 	vec4 misc; // z_far, frame, screen trace enabled, unused.
 	mat4 projection;
 	mat4 prev_view_projection;
+	vec4 rc_params; // radiance cache: base spacing, screen ray distance, enabled, probes per frame.
+	vec4 cam_pos;
 }
 screen;
+
+// Radiance cache: RC_CLIPMAPS clipmaps of RC_PROBES^3 world probes around the camera (spacing doubles per clipmap),
+// each an RC_OCT^2 octahedral map of far radiance. Probes are addressed by wrapped world cell so the camera can move.
+#define RC_PROBES 16
+#define RC_CLIPMAPS 4
+#define RC_OCT 8
+layout(set = 2, binding = 10, rgba16f) uniform restrict image2D radiance_cache;
+layout(set = 2, binding = 11, std430) restrict buffer RcMeta {
+	ivec4 cells[]; // World cell of the probe in each slot, w = 1 when traced.
+}
+rc_meta;
+
+float rc_spacing(int c) {
+	return screen.rc_params.x * float(1 << c);
+}
+
+ivec3 rc_origin(int c) {
+	return ivec3(floor(screen.cam_pos.xyz / rc_spacing(c))) - RC_PROBES / 2;
+}
+
+ivec3 rc_wrap(ivec3 v) {
+	return ((v % RC_PROBES) + RC_PROBES) % RC_PROBES;
+}
+
+int rc_probe_index(int c, ivec3 slot) {
+	return ((c * RC_PROBES + slot.z) * RC_PROBES + slot.y) * RC_PROBES + slot.x;
+}
+
+ivec2 rc_texel_base(int c, ivec3 slot) {
+	return ivec2((slot.x + slot.y * RC_PROBES) * RC_OCT, (c * RC_PROBES + slot.z) * RC_OCT);
+}
+
+// Trilinear blend of the eight valid probes around p in the finest clipmap that contains them, octahedral texel of dir.
+// n is the normal of the surface the ray left: probes behind it (under a floor) get no weight.
+bool rc_sample(vec3 p, vec3 dir, vec3 n, out vec3 r_radiance) {
+	ivec2 oct = clamp(ivec2(vec3_to_oct(dir) * float(RC_OCT)), ivec2(0), ivec2(RC_OCT - 1));
+	for (int c = 0; c < RC_CLIPMAPS; c++) {
+		float spacing = rc_spacing(c);
+		vec3 f = p / spacing - 0.5;
+		ivec3 i0 = ivec3(floor(f));
+		ivec3 origin = rc_origin(c);
+		if (any(lessThan(i0, origin)) || any(greaterThanEqual(i0 + 1, origin + RC_PROBES))) {
+			continue;
+		}
+		vec3 fw = f - vec3(i0);
+		vec3 sum = vec3(0.0);
+		float wsum = 0.0;
+		for (int k = 0; k < 8; k++) {
+			ivec3 corner = ivec3(k & 1, (k >> 1) & 1, k >> 2);
+			ivec3 cell = i0 + corner;
+			ivec3 slot = rc_wrap(cell);
+			ivec4 meta = rc_meta.cells[rc_probe_index(c, slot)];
+			if (meta.w == 0 || any(notEqual(meta.xyz, cell))) {
+				continue;
+			}
+			vec3 cw = mix(1.0 - fw, fw, vec3(corner));
+			float w = cw.x * cw.y * cw.z;
+			vec3 probe_pos = (vec3(cell) + 0.5) * spacing;
+			w *= smoothstep(-0.1, 0.1, dot(normalize(probe_pos - p), n));
+			sum += imageLoad(radiance_cache, rc_texel_base(c, slot) + oct).rgb * w;
+			wsum += w;
+		}
+		if (wsum > 0.0) {
+			r_radiance = sum / wsum;
+			return true;
+		}
+	}
+	return false;
+}
 layout(set = 2, binding = 8, rgba16f) uniform restrict readonly image2D screen_probe_prev;
 layout(set = 2, binding = 9, rgba16f) uniform restrict readonly image2D reflection_history_prev;
 
@@ -432,7 +503,7 @@ float hash1(vec3 p) {
 }
 
 void main() {
-#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE) || defined(MODE_SCREEN_REFLECT)
+#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE) || defined(MODE_SCREEN_REFLECT) || defined(MODE_RADIANCE_PROBES)
 	ivec2 local = ivec2(gl_GlobalInvocationID.xy);
 #else
 	CardData card = cards.data[push.card];
@@ -474,7 +545,9 @@ void main() {
 		if (screen_trace(view_pos + view_normal * 0.02, transpose(mat3(screen.cam_transform)) * dir, s_hit, s_normal)) {
 			traced = sample_cards(s_hit, s_normal, 3.0 / sdf.cascades[0].w, radiance);
 		}
-		if (!traced && sdf_trace(origin, dir, 100.0, hit, cascade)) {
+		bool use_rc = screen.rc_params.z > 0.5;
+		float max_dist = use_rc ? screen.rc_params.y : 100.0;
+		if (!traced && sdf_trace(origin, dir, max_dist, hit, cascade)) {
 			hits++;
 			vec3 hn = sdf_normal(hit, cascade);
 			float cell_size = 1.0 / sdf.cascades[cascade].w;
@@ -482,6 +555,15 @@ void main() {
 				found++;
 			} else {
 				radiance = vec3(0.0);
+			}
+			traced = true;
+		}
+		if (!traced && use_rc) {
+			// Beyond the short screen ray the radiance cache carries the far lighting.
+			vec3 rc;
+			// Sample point pushed half a probe cell along the normal so grazing rays favor probes above the surface.
+			if (rc_sample(origin + dir * max_dist + normal * rc_spacing(0) * 0.5, dir, normal, rc)) {
+				radiance = rc;
 			}
 		}
 		sum += radiance;
@@ -505,6 +587,43 @@ void main() {
 	}
 	float w = prev.a > 0.0 ? 0.125 : 1.0;
 	imageStore(screen_probe_image, local, vec4(mix(prev.rgb, mean, w), depth));
+#endif
+
+#ifdef MODE_RADIANCE_PROBES
+	// One workgroup per probe, one far ray per octahedral texel. Probes are visited round robin over the frames; a slot
+	// whose world cell changed (camera moved) restarts its history.
+	int total = RC_CLIPMAPS * RC_PROBES * RC_PROBES * RC_PROBES;
+	int linear = int((gl_WorkGroupID.x + uint(screen.misc.y) * uint(screen.rc_params.w)) % uint(total));
+	int c = linear / (RC_PROBES * RC_PROBES * RC_PROBES);
+	int rem = linear % (RC_PROBES * RC_PROBES * RC_PROBES);
+	ivec3 slot = ivec3(rem % RC_PROBES, (rem / RC_PROBES) % RC_PROBES, rem / (RC_PROBES * RC_PROBES));
+	ivec3 origin = rc_origin(c);
+	ivec3 cell = origin + rc_wrap(slot - rc_wrap(origin));
+	float spacing = rc_spacing(c);
+	vec3 pos = (vec3(cell) + 0.5) * spacing;
+	int index = rc_probe_index(c, slot);
+	ivec4 meta = rc_meta.cells[index];
+	bool fresh = meta.w == 0 || any(notEqual(meta.xyz, cell));
+	ivec2 texel = ivec2(gl_LocalInvocationID.xy);
+	vec2 jitter = vec2(hash1(vec3(texel, screen.misc.y + float(index))), hash1(vec3(texel.yx, screen.misc.y * 3.0 + float(index) + 11.0)));
+	vec3 dir = normalize(oct_to_vec3((vec2(texel) + jitter) / float(RC_OCT) * 2.0 - 1.0));
+	vec3 radiance = sky_radiance(dir);
+	vec3 hit;
+	int cascade;
+	if (sdf_trace(pos, dir, 200.0, hit, cascade)) {
+		vec3 hn = sdf_normal(hit, cascade);
+		float cell_size = 1.0 / sdf.cascades[cascade].w;
+		if (!sample_cards(hit, hn, 1.5 * cell_size, radiance)) {
+			radiance = vec3(0.0);
+		}
+	}
+	ivec2 at = rc_texel_base(c, slot) + texel;
+	vec3 prev = imageLoad(radiance_cache, at).rgb;
+	imageStore(radiance_cache, at, vec4(fresh ? radiance : mix(prev, radiance, 0.25), 1.0));
+	barrier();
+	if (gl_LocalInvocationIndex == 0u) {
+		rc_meta.cells[index] = ivec4(cell, 1);
+	}
 #endif
 
 #ifdef MODE_SCREEN_REFLECT

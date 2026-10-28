@@ -2921,6 +2921,9 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 			case 14:
 				atlas = surface_cache->get_last_reflection_texture();
 				break;
+			case 15:
+				atlas = surface_cache->get_radiance_cache_texture();
+				break;
 			default:
 				atlas = surface_cache->get_final_texture();
 				break;

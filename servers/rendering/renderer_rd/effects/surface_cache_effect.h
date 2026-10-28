@@ -101,6 +101,7 @@ public:
 	RID get_last_reflection_texture() const { return last_reflection; }
 	RID get_probe_texture() const { return probes; }
 	RID get_screen_probe_texture() const { return screen_probe_texture[history_parity]; }
+	RID get_radiance_cache_texture() const { return radiance_cache_texture; }
 	RID get_last_ambient_texture() const { return last_ambient; }
 
 	RID get_albedo_texture() const { return albedo; }
@@ -133,6 +134,12 @@ private:
 	RID last_ambient;
 	RID last_reflection;
 	RID reflection_history[2];
+	RID radiance_cache_texture;
+	RID radiance_meta_buffer;
+	static const uint32_t RADIANCE_PROBES = 16;
+	static const uint32_t RADIANCE_CLIPMAPS = 4;
+	static const uint32_t RADIANCE_OCT = 8;
+	static const uint32_t RADIANCE_PROBES_PER_FRAME = 512;
 	Size2i reflection_history_size;
 	RID screen_uniform_set_reflection;
 	RID screen_uniform_set_hzb;
@@ -185,6 +192,7 @@ private:
 		LIGHT_MODE_SCREEN_PROBES,
 		LIGHT_MODE_SCREEN_RESOLVE,
 		LIGHT_MODE_SCREEN_REFLECT,
+		LIGHT_MODE_RADIANCE_PROBES,
 		LIGHT_MODE_MAX
 	};
 	RID light_pipelines[LIGHT_MODE_MAX];

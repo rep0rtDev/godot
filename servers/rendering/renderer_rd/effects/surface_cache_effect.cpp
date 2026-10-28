@@ -101,7 +101,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		RD::get_singleton()->texture_clear(t, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	}
 
-	Vector<String> modes = { "\n#define MODE_DIRECT\n", "\n#define MODE_PROBES\n", "\n#define MODE_RESOLVE\n", "\n#define MODE_SCREEN_PROBES\n", "\n#define MODE_SCREEN_RESOLVE\n", "\n#define MODE_SCREEN_REFLECT\n" };
+	Vector<String> modes = { "\n#define MODE_DIRECT\n", "\n#define MODE_PROBES\n", "\n#define MODE_RESOLVE\n", "\n#define MODE_SCREEN_PROBES\n", "\n#define MODE_SCREEN_RESOLVE\n", "\n#define MODE_SCREEN_REFLECT\n", "\n#define MODE_RADIANCE_PROBES\n" };
 	light_shader.initialize(modes);
 	light_shader_version = light_shader.version_create();
 	for (int i = 0; i < LIGHT_MODE_MAX; i++) {
@@ -109,7 +109,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	}
 	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4 + sizeof(float) * 8);
 	grid_buffer = RD::get_singleton()->storage_buffer_create(GRID * GRID * GRID * GRID_SLOTS * sizeof(uint32_t));
-	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8 + 16 + 16));
+	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8 + 16 + 16 + 8));
 	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 12);
 	{
 		RD::TextureFormat stf;
@@ -139,7 +139,7 @@ SurfaceCacheEffect::~SurfaceCacheEffect() {
 	if (light_shader_version.is_valid()) {
 		light_shader.version_free(light_shader_version);
 	}
-	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, dummy_sky_tex, screen_probe_texture[0], screen_probe_texture[1], reflection_history[0], reflection_history[1], screen_params_buffer }) {
+	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, dummy_sky_tex, screen_probe_texture[0], screen_probe_texture[1], reflection_history[0], reflection_history[1], radiance_cache_texture, radiance_meta_buffer, screen_params_buffer }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -676,6 +676,20 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		}
 		screen_probe_size = probe_size;
 	}
+	if (radiance_cache_texture.is_null()) {
+		RD::TextureFormat tf;
+		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		tf.width = RADIANCE_PROBES * RADIANCE_PROBES * RADIANCE_OCT;
+		tf.height = RADIANCE_CLIPMAPS * RADIANCE_PROBES * RADIANCE_OCT;
+		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		radiance_cache_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		RD::get_singleton()->set_resource_name(radiance_cache_texture, "Surface cache radiance cache");
+		RD::get_singleton()->texture_clear(radiance_cache_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		Vector<uint8_t> zero;
+		zero.resize(RADIANCE_CLIPMAPS * RADIANCE_PROBES * RADIANCE_PROBES * RADIANCE_PROBES * 16);
+		memset(zero.ptrw(), 0, zero.size());
+		radiance_meta_buffer = RD::get_singleton()->storage_buffer_create(zero.size(), zero);
+	}
 	if (reflection_history[0].is_null() || reflection_history_size != p_ambient_size) {
 		for (int i = 0; i < 2; i++) {
 			if (reflection_history[i].is_valid()) {
@@ -702,6 +716,8 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		float misc[4];
 		float projection[16];
 		float prev_view_projection[16];
+		float rc_params[4];
+		float cam_pos[4];
 	} sp;
 	Projection correction;
 	correction.set_depth_correction(true);
@@ -714,6 +730,16 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	}
 	MaterialStorage::store_camera(prev_view_projection, sp.prev_view_projection);
 	prev_view_projection = view_projection;
+	float rc_spacing = GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache_spacing");
+	sp.rc_params[0] = MAX(rc_spacing, 0.1f);
+	sp.rc_params[1] = sp.rc_params[0] * 4.0f;
+	sp.rc_params[2] = GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache") ? 1.0f : 0.0f;
+	sp.rc_params[3] = float(RADIANCE_PROBES_PER_FRAME);
+	Vector3 cam_origin = p_cam_transform.origin;
+	sp.cam_pos[0] = cam_origin.x;
+	sp.cam_pos[1] = cam_origin.y;
+	sp.cam_pos[2] = cam_origin.z;
+	sp.cam_pos[3] = 0.0f;
 	MaterialStorage::store_transform(p_cam_transform, sp.cam_transform);
 	sp.size[0] = p_internal_size.x;
 	sp.size[1] = p_internal_size.y;
@@ -745,6 +771,8 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		add(RD::UNIFORM_TYPE_TEXTURE, 7, p_hzb.is_valid() ? p_hzb : p_depth);
 		add(RD::UNIFORM_TYPE_IMAGE, 8, screen_probe_texture[history_parity ^ 1]);
 		add(RD::UNIFORM_TYPE_IMAGE, 9, reflection_history[history_parity ^ 1]);
+		add(RD::UNIFORM_TYPE_IMAGE, 10, radiance_cache_texture);
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, radiance_meta_buffer);
 		if (screen_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(screen_uniform_set)) {
 			RD::get_singleton()->free_rid(screen_uniform_set);
 		}
@@ -760,6 +788,15 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	screen_uniform_set_parity = history_parity;
 	uint32_t pc[4] = { 0, light_debug, 0, 0 };
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
+	if (sp.rc_params[2] > 0.5f) {
+		RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[LIGHT_MODE_RADIANCE_PROBES]);
+		RD::get_singleton()->compute_list_bind_uniform_set(cl, light_uniform_set, 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
+		RD::get_singleton()->compute_list_bind_uniform_set(cl, screen_uniform_set, 2);
+		RD::get_singleton()->compute_list_set_push_constant(cl, pc, sizeof(pc));
+		RD::get_singleton()->compute_list_dispatch(cl, RADIANCE_PROBES_PER_FRAME, 1, 1);
+		RD::get_singleton()->compute_list_add_barrier(cl);
+	}
 	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[LIGHT_MODE_SCREEN_PROBES]);
 	RD::get_singleton()->compute_list_bind_uniform_set(cl, light_uniform_set, 0);
 	RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
