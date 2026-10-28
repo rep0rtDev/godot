@@ -70,6 +70,7 @@ private:
 	TsrShaderRD shader;
 	RID shader_version;
 	RID pipeline;
+	RID pipeline_sharpen;
 	RID linear_sampler;
 	uint64_t frame = 0;
 };

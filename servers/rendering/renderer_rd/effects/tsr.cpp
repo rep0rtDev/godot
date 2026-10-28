@@ -37,10 +37,11 @@
 using namespace RendererRD;
 
 TSREffect::TSREffect() {
-	Vector<String> modes = { "" };
+	Vector<String> modes = { "", "\n#define MODE_SHARPEN\n" };
 	shader.initialize(modes);
 	shader_version = shader.version_create();
 	pipeline = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, 0));
+	pipeline_sharpen = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, 1));
 	RD::SamplerState ss;
 	ss.mag_filter = RD::SAMPLER_FILTER_LINEAR;
 	ss.min_filter = RD::SAMPLER_FILTER_LINEAR;
@@ -95,5 +96,17 @@ void TSREffect::process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parame
 	RD::get_singleton()->compute_list_bind_uniform_set(cl, uniform_set, 0);
 	RD::get_singleton()->compute_list_set_push_constant(cl, &pc, sizeof(pc));
 	RD::get_singleton()->compute_list_dispatch(cl, Math::division_round_up(uint32_t(p_params.target_size.x), 8u), Math::division_round_up(uint32_t(p_params.target_size.y), 8u), 1);
+	if (p_params.sharpness < 2.0f) {
+		// RCAS on the accumulated frame: reads history_out, writes the final output.
+		RD::get_singleton()->compute_list_add_barrier(cl);
+		RID sharpen_shader = shader.version_get_shader(shader_version, 1);
+		RD::Uniform u_accum(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ linear_sampler, history_out }));
+		RD::Uniform u_unused(RD::UNIFORM_TYPE_IMAGE, 5, Vector<RID>({ history_in }));
+		RID sharpen_set = cache->get_cache(sharpen_shader, 0, u_accum, u_depth, u_velocity, u_history, u_output, u_unused);
+		RD::get_singleton()->compute_list_bind_compute_pipeline(cl, pipeline_sharpen);
+		RD::get_singleton()->compute_list_bind_uniform_set(cl, sharpen_set, 0);
+		RD::get_singleton()->compute_list_set_push_constant(cl, &pc, sizeof(pc));
+		RD::get_singleton()->compute_list_dispatch(cl, Math::division_round_up(uint32_t(p_params.target_size.x), 8u), Math::division_round_up(uint32_t(p_params.target_size.y), 8u), 1);
+	}
 	RD::get_singleton()->compute_list_end();
 }

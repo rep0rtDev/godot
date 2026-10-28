@@ -81,6 +81,33 @@ vec3 clip_aabb(vec3 aabb_min, vec3 aabb_max, vec3 q) {
 	return ma > 1.0 ? center + v / ma : q;
 }
 
+#ifdef MODE_SHARPEN
+
+// RCAS (robust contrast adaptive sharpening) on the accumulated frame, in tonemapped space. params.sharpness is in
+// stops as for FSR: 0 is the strongest, 2 disables the pass.
+void main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(vec2(pixel), params.target_size))) {
+		return;
+	}
+	ivec2 mx = ivec2(params.target_size) - 1;
+	vec3 e = reinhard(texelFetch(color_buffer, pixel, 0).rgb);
+	vec3 b = reinhard(texelFetch(color_buffer, clamp(pixel + ivec2(0, -1), ivec2(0), mx), 0).rgb);
+	vec3 d = reinhard(texelFetch(color_buffer, clamp(pixel + ivec2(-1, 0), ivec2(0), mx), 0).rgb);
+	vec3 f = reinhard(texelFetch(color_buffer, clamp(pixel + ivec2(1, 0), ivec2(0), mx), 0).rgb);
+	vec3 h = reinhard(texelFetch(color_buffer, clamp(pixel + ivec2(0, 1), ivec2(0), mx), 0).rgb);
+	vec3 mn4 = min(min(b, d), min(f, h));
+	vec3 mx4 = max(max(b, d), max(f, h));
+	vec3 hit_min = mn4 / max(4.0 * mx4, vec3(1e-4));
+	vec3 hit_max = (1.0 - mx4) / min(4.0 * mn4 - 4.0, vec3(-1e-4));
+	vec3 lobe_rgb = max(-hit_min, hit_max);
+	float lobe = max(-0.1875, min(max(lobe_rgb.r, max(lobe_rgb.g, lobe_rgb.b)), 0.0)) * exp2(-params.sharpness);
+	vec3 o = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
+	imageStore(output_buffer, pixel, vec4(reinhard_inverse(max(o, vec3(0.0))), 1.0));
+}
+
+#else
+
 void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (any(greaterThanEqual(vec2(pixel), params.target_size))) {
@@ -163,3 +190,5 @@ void main() {
 	imageStore(history_out, pixel, vec4(out_rgb, frames / 16.0));
 	imageStore(output_buffer, pixel, vec4(out_rgb, 1.0));
 }
+
+#endif
