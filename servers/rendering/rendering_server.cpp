@@ -3782,7 +3782,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/cards_per_frame", PROPERTY_HINT_RANGE, "1,2000,1"), 300);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/surface_cache/texels_per_meter", PROPERTY_HINT_RANGE, "1,100,1"), 10.0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/max_card_size", PROPERTY_HINT_ENUM, "64,128,256,512"), 512);
-	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/debug/mode", PROPERTY_HINT_RANGE, "0,15,1"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/debug/mode", PROPERTY_HINT_RANGE, "0,16,1"), 0);
 	GLOBAL_DEF("rendering/virtual_geometry/software_raster", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/virtual_geometry/software_raster_max_pixels", PROPERTY_HINT_RANGE, "1,256,0.1"), 64.0);
 

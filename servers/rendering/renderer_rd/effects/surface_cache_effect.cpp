@@ -51,7 +51,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		return;
 	}
 	debug_mode = GLOBAL_GET("rendering/global_illumination/surface_cache/debug/mode");
-	light_debug = debug_mode == 7 ? 1 : (debug_mode == 10 ? 2 : (debug_mode == 11 || debug_mode == 14 ? 3 : 0));
+	light_debug = debug_mode == 7 ? 1 : (debug_mode == 10 ? 2 : (debug_mode == 11 || debug_mode == 14 ? 3 : (debug_mode == 16 ? 4 : 0)));
 	screen_probes = GLOBAL_GET("rendering/global_illumination/surface_cache/screen_probes");
 	atlas_size = GLOBAL_GET("rendering/global_illumination/surface_cache/atlas_size");
 	cards_per_frame = GLOBAL_GET("rendering/global_illumination/surface_cache/cards_per_frame");
@@ -109,8 +109,8 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	}
 	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4 + sizeof(float) * 8);
 	grid_buffer = RD::get_singleton()->storage_buffer_create(GRID * GRID * GRID * GRID_SLOTS * sizeof(uint32_t));
-	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8 + 16 + 16 + 8));
-	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 12);
+	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8 + 16 + 16));
+	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 14);
 	{
 		RD::TextureFormat stf;
 		stf.width = 1;
@@ -543,7 +543,7 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 	params.sky[3] = float(frame % 4096);
 	RD::get_singleton()->buffer_update(light_params_buffer, 0, sizeof(Params), &params);
 	{
-		float sdf_params[4 * 12] = {};
+		float sdf_params[4 * 14] = {};
 		sdf_params[0] = float(p_sdf_grid_size);
 		sdf_params[1] = p_sdf_y_mult;
 		sdf_params[2] = float(MIN(p_sdf_cascades.size(), 8));
@@ -564,6 +564,16 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		sdf_params[45] = p_sky.orientation.y;
 		sdf_params[46] = p_sky.orientation.z;
 		sdf_params[47] = p_sky.orientation.w;
+		float rc_spacing = GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache_spacing");
+		radiance_cache_enabled = GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache");
+		sdf_params[48] = MAX(rc_spacing, 0.1f);
+		sdf_params[49] = sdf_params[48] * 4.0f;
+		sdf_params[50] = radiance_cache_enabled ? 1.0f : 0.0f;
+		sdf_params[51] = float(RADIANCE_PROBES_PER_FRAME);
+		sdf_params[52] = p_view_to_world.origin.x;
+		sdf_params[53] = p_view_to_world.origin.y;
+		sdf_params[54] = p_view_to_world.origin.z;
+		sdf_params[55] = float(frame % 4096);
 		RD::get_singleton()->buffer_update(sdf_params_buffer, 0, sizeof(sdf_params), sdf_params);
 	}
 
@@ -624,6 +634,17 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		sk.binding = 2;
 		sk.append_id(sky_tex);
 		su.push_back(sk);
+		_ensure_radiance_cache();
+		RD::Uniform rc;
+		rc.uniform_type = RD::UNIFORM_TYPE_IMAGE;
+		rc.binding = 3;
+		rc.append_id(radiance_cache_texture);
+		su.push_back(rc);
+		RD::Uniform rm;
+		rm.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		rm.binding = 4;
+		rm.append_id(radiance_meta_buffer);
+		su.push_back(rm);
 		if (sdf_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
 			RD::get_singleton()->free_rid(sdf_uniform_set);
 		}
@@ -652,6 +673,26 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 	RD::get_singleton()->compute_list_end();
 }
 
+void SurfaceCacheEffect::_ensure_radiance_cache() {
+	if (radiance_cache_texture.is_valid()) {
+		return;
+	}
+	{
+		RD::TextureFormat tf;
+		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		tf.width = RADIANCE_PROBES * RADIANCE_PROBES * RADIANCE_OCT;
+		tf.height = RADIANCE_CLIPMAPS * RADIANCE_PROBES * RADIANCE_OCT;
+		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		radiance_cache_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		RD::get_singleton()->set_resource_name(radiance_cache_texture, "Surface cache radiance cache");
+		RD::get_singleton()->texture_clear(radiance_cache_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		Vector<uint8_t> zero;
+		zero.resize(RADIANCE_CLIPMAPS * RADIANCE_PROBES * RADIANCE_PROBES * RADIANCE_PROBES * 16);
+		memset(zero.ptrw(), 0, zero.size());
+		radiance_meta_buffer = RD::get_singleton()->storage_buffer_create(zero.size(), zero);
+	}
+}
+
 void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness, RID p_ambient, RID p_reflection, RID p_hzb, const Size2i &p_internal_size, const Size2i &p_ambient_size, const Projection &p_projection, const Transform3D &p_cam_transform) {
 	history_parity ^= 1;
 	if (light_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(light_uniform_set) || sdf_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
@@ -676,20 +717,7 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		}
 		screen_probe_size = probe_size;
 	}
-	if (radiance_cache_texture.is_null()) {
-		RD::TextureFormat tf;
-		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-		tf.width = RADIANCE_PROBES * RADIANCE_PROBES * RADIANCE_OCT;
-		tf.height = RADIANCE_CLIPMAPS * RADIANCE_PROBES * RADIANCE_OCT;
-		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
-		radiance_cache_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
-		RD::get_singleton()->set_resource_name(radiance_cache_texture, "Surface cache radiance cache");
-		RD::get_singleton()->texture_clear(radiance_cache_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
-		Vector<uint8_t> zero;
-		zero.resize(RADIANCE_CLIPMAPS * RADIANCE_PROBES * RADIANCE_PROBES * RADIANCE_PROBES * 16);
-		memset(zero.ptrw(), 0, zero.size());
-		radiance_meta_buffer = RD::get_singleton()->storage_buffer_create(zero.size(), zero);
-	}
+	_ensure_radiance_cache();
 	if (reflection_history[0].is_null() || reflection_history_size != p_ambient_size) {
 		for (int i = 0; i < 2; i++) {
 			if (reflection_history[i].is_valid()) {
@@ -716,8 +744,6 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		float misc[4];
 		float projection[16];
 		float prev_view_projection[16];
-		float rc_params[4];
-		float cam_pos[4];
 	} sp;
 	Projection correction;
 	correction.set_depth_correction(true);
@@ -730,16 +756,6 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	}
 	MaterialStorage::store_camera(prev_view_projection, sp.prev_view_projection);
 	prev_view_projection = view_projection;
-	float rc_spacing = GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache_spacing");
-	sp.rc_params[0] = MAX(rc_spacing, 0.1f);
-	sp.rc_params[1] = sp.rc_params[0] * 4.0f;
-	sp.rc_params[2] = GLOBAL_GET("rendering/global_illumination/surface_cache/radiance_cache") ? 1.0f : 0.0f;
-	sp.rc_params[3] = float(RADIANCE_PROBES_PER_FRAME);
-	Vector3 cam_origin = p_cam_transform.origin;
-	sp.cam_pos[0] = cam_origin.x;
-	sp.cam_pos[1] = cam_origin.y;
-	sp.cam_pos[2] = cam_origin.z;
-	sp.cam_pos[3] = 0.0f;
 	MaterialStorage::store_transform(p_cam_transform, sp.cam_transform);
 	sp.size[0] = p_internal_size.x;
 	sp.size[1] = p_internal_size.y;
@@ -771,8 +787,6 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		add(RD::UNIFORM_TYPE_TEXTURE, 7, p_hzb.is_valid() ? p_hzb : p_depth);
 		add(RD::UNIFORM_TYPE_IMAGE, 8, screen_probe_texture[history_parity ^ 1]);
 		add(RD::UNIFORM_TYPE_IMAGE, 9, reflection_history[history_parity ^ 1]);
-		add(RD::UNIFORM_TYPE_IMAGE, 10, radiance_cache_texture);
-		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, radiance_meta_buffer);
 		if (screen_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(screen_uniform_set)) {
 			RD::get_singleton()->free_rid(screen_uniform_set);
 		}
@@ -788,7 +802,7 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	screen_uniform_set_parity = history_parity;
 	uint32_t pc[4] = { 0, light_debug, 0, 0 };
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
-	if (sp.rc_params[2] > 0.5f) {
+	if (radiance_cache_enabled) {
 		RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[LIGHT_MODE_RADIANCE_PROBES]);
 		RD::get_singleton()->compute_list_bind_uniform_set(cl, light_uniform_set, 0);
 		RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
