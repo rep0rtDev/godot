@@ -131,19 +131,17 @@ private:
 			RID vg_cluster_buffer;
 			RID vg_node_buffer;
 			uint32_t vg_node_count = 0;
-			RID vg_page_buffer; // Page pool: every page, or vg_pool_slots slots of PAGE_SIZE when streaming.
+			RID vg_page_buffer; // Every page of this surface, or the shared vg_pool buffer when streaming (not owned then).
 			RID vg_page_table_buffer; // Word offset per page, see virtual_geometry_geometry_inc.glsl.
 			RID vg_children_buffer;
 			RID vg_request_buffer; // Per page: 1 drawn, 2 wanted; written by the select shader.
 			// Streaming state, see mesh_surface_vg_stream().
 			bool vg_streaming = false;
 			uint32_t vg_stream_id = 0;
-			uint32_t vg_pool_slots = 0;
 			VirtualGeometryHeader vg_header = {};
 			Vector<uint32_t> vg_page_table;
-			Vector<int32_t> vg_page_slot; // -1 when not resident.
-			Vector<uint32_t> vg_slot_page;
-			Vector<uint64_t> vg_page_last_used;
+			bool vg_page_table_dirty = false;
+			Vector<int32_t> vg_page_slot; // Slot in the shared pool, -1 when not resident.
 			Vector<uint32_t> vg_page_dependents; // Resident pages that depend on this page.
 			Vector<uint32_t> vg_requests; // Last readback.
 			bool vg_requests_pending = false;
@@ -574,12 +572,25 @@ public:
 
 private:
 	static HashMap<uint32_t, Mesh::Surface *> vg_streaming_surfaces;
+	// One page pool for every streaming surface; a slot holds one page of one surface.
+	struct VGPool {
+		RID buffer;
+		uint32_t slots = 0;
+		Vector<Mesh::Surface *> slot_surface;
+		Vector<uint32_t> slot_page;
+		Vector<uint64_t> slot_last_used;
+		uint64_t frame = 0; // Frame of the current install budget.
+		uint32_t installed = 0; // Pages installed in that frame.
+	};
+	static VGPool vg_pool;
 	static bool vg_pull_supported;
 	static uint32_t vg_stream_id_counter;
 	static const VirtualGeometryPage *_vg_pages(const Mesh::Surface *p_surface);
 	static const uint32_t *_vg_dependencies(const Mesh::Surface *p_surface);
 	static bool _vg_install_page(Mesh::Surface *p_surface, uint32_t p_page, uint64_t p_frame);
 	static void _vg_evict_page(Mesh::Surface *p_surface, uint32_t p_page);
+	static void _vg_evict_surface(Mesh::Surface *p_surface);
+	static void _vg_flush_page_tables();
 	static void _vg_requests_received(const Vector<uint8_t> &p_data, uint32_t p_stream_id);
 
 public:

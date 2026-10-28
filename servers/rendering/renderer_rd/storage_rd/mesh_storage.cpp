@@ -191,6 +191,10 @@ MeshStorage::MeshStorage() {
 }
 
 MeshStorage::~MeshStorage() {
+	if (vg_pool.buffer.is_valid()) {
+		RD::get_singleton()->free_rid(vg_pool.buffer);
+		vg_pool = VGPool();
+	}
 	//def buffers
 	for (int i = 0; i < DEFAULT_RD_BUFFER_MAX; i++) {
 		RD::get_singleton()->free_rid(mesh_default_rd_buffers[i]);
@@ -451,24 +455,41 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 			s->vg_request_buffer = RD::get_singleton()->storage_buffer_create(vg_header.page_count * sizeof(uint32_t));
 			s->vg_page_table.resize_initialized(vg_header.page_count);
 			const uint32_t resident_pages = GLOBAL_GET("rendering/virtual_geometry/streaming/resident_pages");
-			if (resident_pages > 0 && resident_pages < vg_header.page_count) {
-				// Streaming: a pool of PAGE_SIZE slots, only the root page to begin with; the rest comes in on request.
+			bool streaming = resident_pages > 0;
+			if (streaming) {
+				// Streaming: the shared pool of PAGE_SIZE slots, only the root page to begin with; the rest comes in on request.
+				if (vg_pool.buffer.is_null()) {
+					vg_pool.slots = resident_pages;
+					vg_pool.buffer = RD::get_singleton()->storage_buffer_create(uint64_t(resident_pages) * VirtualGeometry::PAGE_SIZE);
+					vg_pool.slot_surface.resize_initialized(resident_pages);
+					vg_pool.slot_page.resize(resident_pages);
+					vg_pool.slot_page.fill(UINT32_MAX);
+					vg_pool.slot_last_used.resize_initialized(resident_pages);
+				}
 				s->vg_streaming = true;
-				s->vg_pool_slots = resident_pages;
-				s->vg_page_buffer = RD::get_singleton()->storage_buffer_create(uint64_t(resident_pages) * VirtualGeometry::PAGE_SIZE);
+				s->vg_page_buffer = vg_pool.buffer;
 				s->vg_page_slot.resize(vg_header.page_count);
 				s->vg_page_slot.fill(-1);
-				s->vg_slot_page.resize(resident_pages);
-				s->vg_slot_page.fill(UINT32_MAX);
-				s->vg_page_last_used.resize_initialized(vg_header.page_count);
 				s->vg_page_dependents.resize_initialized(vg_header.page_count);
 				s->vg_page_table.fill(UINT32_MAX); // NOT_RESIDENT.
-				_vg_install_page(s, 0, 0);
-				s->vg_page_table_buffer = RD::get_singleton()->storage_buffer_create(s->vg_page_table.size() * sizeof(uint32_t), s->vg_page_table.to_byte_array());
-				s->vg_stream_id = ++vg_stream_id_counter;
-				vg_streaming_surfaces[s->vg_stream_id] = s;
-				print_verbose(vformat("Virtual geometry: streaming %d pages through %d slots.", vg_header.page_count, resident_pages));
-			} else {
+				if (_vg_install_page(s, 0, vg_pool.frame)) {
+					s->vg_page_table_dirty = false;
+					s->vg_page_table_buffer = RD::get_singleton()->storage_buffer_create(s->vg_page_table.size() * sizeof(uint32_t), s->vg_page_table.to_byte_array());
+					s->vg_stream_id = ++vg_stream_id_counter;
+					vg_streaming_surfaces[s->vg_stream_id] = s;
+					print_verbose(vformat("Virtual geometry: streaming %d pages through the %d slot pool.", vg_header.page_count, resident_pages));
+				} else {
+					// The pool holds nothing but root pages; this surface keeps all of its pages itself.
+					WARN_PRINT_ONCE(vformat("Virtual geometry: the page pool (%d slots) is full of root pages, raise rendering/virtual_geometry/streaming/resident_pages.", resident_pages));
+					s->vg_streaming = false;
+					s->vg_page_buffer = RID();
+					s->vg_page_slot.clear();
+					s->vg_page_dependents.clear();
+					s->vg_page_table.fill(0);
+					streaming = false;
+				}
+			}
+			if (!streaming) {
 				// Every page resident, in file order: a cluster's geometry offset addresses the buffer directly.
 				s->vg_page_buffer = RD::get_singleton()->storage_buffer_create(vg_header.data_size, new_surface.vg_cluster_data.slice(page_data_offset));
 				s->vg_page_table_buffer = RD::get_singleton()->storage_buffer_create(s->vg_page_table.size() * sizeof(uint32_t), s->vg_page_table.to_byte_array());
@@ -594,7 +615,9 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 	if (s.vg_cluster_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.vg_cluster_buffer);
 	}
-	if (s.vg_page_buffer.is_valid()) {
+	if (s.vg_streaming) {
+		_vg_evict_surface(&s);
+	} else if (s.vg_page_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.vg_page_buffer);
 	}
 	if (s.vg_page_table_buffer.is_valid()) {
@@ -747,6 +770,7 @@ RID MeshStorage::mesh_surface_get_material(RID p_mesh, int p_surface) const {
 
 HashMap<uint32_t, MeshStorage::Mesh::Surface *> MeshStorage::vg_streaming_surfaces;
 uint32_t MeshStorage::vg_stream_id_counter = 0;
+MeshStorage::VGPool MeshStorage::vg_pool;
 bool MeshStorage::vg_pull_supported = false;
 
 const VirtualGeometryPage *MeshStorage::_vg_pages(const Mesh::Surface *p_surface) {
@@ -763,37 +787,41 @@ bool MeshStorage::_vg_install_page(Mesh::Surface *p_surface, uint32_t p_page, ui
 		return true;
 	}
 	int32_t slot = -1;
-	for (uint32_t i = 0; i < p_surface->vg_pool_slots; i++) {
-		if (p_surface->vg_slot_page[i] == UINT32_MAX) {
+	for (uint32_t i = 0; i < vg_pool.slots; i++) {
+		if (vg_pool.slot_surface[i] == nullptr) {
 			slot = i;
 			break;
 		}
 	}
 	if (slot < 0) {
-		// Evict the least recently drawn page that nothing resident depends on; the root page stays.
-		uint32_t victim = UINT32_MAX;
-		for (uint32_t pg = 1; pg < p_surface->vg_header.page_count; pg++) {
-			if (p_surface->vg_page_slot[pg] < 0 || p_surface->vg_page_dependents[pg] > 0 || p_surface->vg_page_last_used[pg] + 2 > p_frame) {
+		// Evict the least recently drawn page of any surface that nothing resident depends on; root pages stay.
+		int32_t victim = -1;
+		for (uint32_t i = 0; i < vg_pool.slots; i++) {
+			const Mesh::Surface *owner = vg_pool.slot_surface[i];
+			const uint32_t pg = vg_pool.slot_page[i];
+			if (pg == 0 || owner->vg_page_dependents[pg] > 0 || vg_pool.slot_last_used[i] + 2 > p_frame) {
 				continue;
 			}
-			if (victim == UINT32_MAX || p_surface->vg_page_last_used[pg] < p_surface->vg_page_last_used[victim]) {
-				victim = pg;
+			if (victim < 0 || vg_pool.slot_last_used[i] < vg_pool.slot_last_used[victim]) {
+				victim = i;
 			}
 		}
-		if (victim == UINT32_MAX) {
+		if (victim < 0) {
 			return false;
 		}
-		slot = p_surface->vg_page_slot[victim];
-		_vg_evict_page(p_surface, victim);
+		slot = victim;
+		_vg_evict_page(vg_pool.slot_surface[victim], vg_pool.slot_page[victim]);
 	}
 	const VirtualGeometryPage &page = _vg_pages(p_surface)[p_page];
 	const uint8_t *data = p_surface->vg_cluster_data.ptr() + VirtualGeometry::get_page_data_offset(p_surface->vg_header) + page.offset;
-	RD::get_singleton()->buffer_update(p_surface->vg_page_buffer, uint64_t(slot) * VirtualGeometry::PAGE_SIZE, page.size, data);
+	RD::get_singleton()->buffer_update(vg_pool.buffer, uint64_t(slot) * VirtualGeometry::PAGE_SIZE, page.size, data);
 	p_surface->vg_page_slot.write[p_page] = slot;
-	p_surface->vg_slot_page.write[slot] = p_page;
-	p_surface->vg_page_last_used.write[p_page] = p_frame;
+	vg_pool.slot_surface.write[slot] = p_surface;
+	vg_pool.slot_page.write[slot] = p_page;
+	vg_pool.slot_last_used.write[slot] = p_frame;
 	// Word offset so that pool[table[page] + geometry_offset / 4] is the cluster header (wraps when negative).
 	p_surface->vg_page_table.write[p_page] = uint32_t(slot) * (VirtualGeometry::PAGE_SIZE / 4) - page.offset / 4;
+	p_surface->vg_page_table_dirty = true;
 	const uint32_t *deps = _vg_dependencies(p_surface);
 	for (uint32_t d = 0; d < page.dependency_count; d++) {
 		p_surface->vg_page_dependents.write[deps[page.dependency_first + d]]++;
@@ -806,13 +834,36 @@ void MeshStorage::_vg_evict_page(Mesh::Surface *p_surface, uint32_t p_page) {
 	if (slot < 0) {
 		return;
 	}
-	p_surface->vg_slot_page.write[slot] = UINT32_MAX;
+	vg_pool.slot_surface.write[slot] = nullptr;
+	vg_pool.slot_page.write[slot] = UINT32_MAX;
 	p_surface->vg_page_slot.write[p_page] = -1;
 	p_surface->vg_page_table.write[p_page] = UINT32_MAX;
+	p_surface->vg_page_table_dirty = true;
 	const VirtualGeometryPage &page = _vg_pages(p_surface)[p_page];
 	const uint32_t *deps = _vg_dependencies(p_surface);
 	for (uint32_t d = 0; d < page.dependency_count; d++) {
 		p_surface->vg_page_dependents.write[deps[page.dependency_first + d]]--;
+	}
+}
+
+void MeshStorage::_vg_evict_surface(Mesh::Surface *p_surface) {
+	for (uint32_t i = 0; i < vg_pool.slots; i++) {
+		if (vg_pool.slot_surface[i] == p_surface) {
+			vg_pool.slot_surface.write[i] = nullptr;
+			vg_pool.slot_page.write[i] = UINT32_MAX;
+		}
+	}
+	// Dependents of pages in other surfaces are only ever counted within one surface, nothing else to undo.
+}
+
+// Uploads the page table of every surface whose residency changed, also those evicted on behalf of another surface.
+void MeshStorage::_vg_flush_page_tables() {
+	for (const KeyValue<uint32_t, Mesh::Surface *> &kv : vg_streaming_surfaces) {
+		Mesh::Surface *s = kv.value;
+		if (s->vg_page_table_dirty) {
+			s->vg_page_table_dirty = false;
+			RD::get_singleton()->buffer_update(s->vg_page_table_buffer, 0, s->vg_page_table.size() * sizeof(uint32_t), s->vg_page_table.ptr());
+		}
 	}
 }
 
@@ -835,13 +886,17 @@ void MeshStorage::mesh_surface_vg_stream(void *p_surface, uint64_t p_frame) {
 	if (!s->vg_streaming) {
 		return;
 	}
+	if (vg_pool.frame != p_frame) {
+		vg_pool.frame = p_frame;
+		vg_pool.installed = 0;
+	}
 	if (s->vg_requests.size() == int(s->vg_header.page_count)) {
 		const uint32_t budget = GLOBAL_GET("rendering/virtual_geometry/streaming/pages_per_frame");
-		uint32_t installed = 0;
+		uint32_t &installed = vg_pool.installed;
 		bool dirty = false;
 		for (uint32_t pg = 0; pg < s->vg_header.page_count; pg++) {
 			if ((s->vg_requests[pg] & 1) && s->vg_page_slot[pg] >= 0) {
-				s->vg_page_last_used.write[pg] = p_frame;
+				vg_pool.slot_last_used.write[s->vg_page_slot[pg]] = p_frame;
 			}
 		}
 		// Pages are ordered coarse to fine, so parents (and dependencies) tend to come first.
@@ -867,10 +922,14 @@ void MeshStorage::mesh_surface_vg_stream(void *p_surface, uint64_t p_frame) {
 		}
 		s->vg_requests.clear();
 		if (dirty) {
-			RD::get_singleton()->buffer_update(s->vg_page_table_buffer, 0, s->vg_page_table.size() * sizeof(uint32_t), s->vg_page_table.ptr());
-			print_verbose(vformat("Virtual geometry: %d of %d pages resident.", mesh_surface_get_vg_resident_pages(s), s->vg_header.page_count));
+			uint32_t used = 0;
+			for (uint32_t i = 0; i < vg_pool.slots; i++) {
+				used += vg_pool.slot_surface[i] != nullptr ? 1 : 0;
+			}
+			print_verbose(vformat("Virtual geometry: %d of %d pages resident, pool %d of %d slots.", mesh_surface_get_vg_resident_pages(s), s->vg_header.page_count, used, vg_pool.slots));
 		}
 	}
+	_vg_flush_page_tables();
 	if (!s->vg_requests_pending) {
 		s->vg_requests_pending = true;
 		RD::get_singleton()->buffer_get_data_async(s->vg_request_buffer, callable_mp_static(&MeshStorage::_vg_requests_received).bind(s->vg_stream_id));
@@ -884,8 +943,8 @@ uint32_t MeshStorage::mesh_surface_get_vg_resident_pages(void *p_surface) const 
 		return s->vg_header.page_count;
 	}
 	uint32_t count = 0;
-	for (uint32_t i = 0; i < s->vg_pool_slots; i++) {
-		count += s->vg_slot_page[i] != UINT32_MAX ? 1 : 0;
+	for (uint32_t pg = 0; pg < s->vg_header.page_count; pg++) {
+		count += s->vg_page_slot[pg] >= 0 ? 1 : 0;
 	}
 	return count;
 }

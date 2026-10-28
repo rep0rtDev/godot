@@ -66,9 +66,20 @@ func _init() -> void:
 				kept.append(idx[t * 3 + 2])
 		arrays[Mesh.ARRAY_INDEX] = kept
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [], {}, flags)
+	# Several distinct meshes (different ring counts), so that page streaming has to share its pool between surfaces.
+	var meshes: Array[ArrayMesh] = [mesh]
+	for m in range(1, int(arg("meshes", "1"))):
+		var sm2 := SphereMesh.new()
+		sm2.rings = sm.rings - 4 * m
+		sm2.radial_segments = sm2.rings * 2
+		var mesh2 := ArrayMesh.new()
+		mesh2.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sm2.get_mesh_arrays(), [], {}, flags)
+		meshes.append(mesh2)
 	if arg("mat", "") == "tex":
 		# Checker albedo plus a bump normal map, to compare UV, normal and tangent reconstruction.
-		mesh.surface_set_material(0, textured_material())
+		var tex_mat := textured_material()
+		for m in meshes:
+			m.surface_set_material(0, tex_mat)
 	match arg("cull", ""):
 		"back", "front", "disabled":
 			var mat: StandardMaterial3D = mesh.surface_get_material(0)
@@ -81,7 +92,7 @@ func _init() -> void:
 	var side := int(ceil(sqrt(count)))
 	for i in count:
 		var mi := MeshInstance3D.new()
-		mi.mesh = mesh
+		mi.mesh = meshes[i % meshes.size()]
 		mi.position = Vector3((i % side) * 3.0, 0, -(i / side) * 3.0)
 		root.add_child(mi)
 	if arg("wall", "0") == "1":
