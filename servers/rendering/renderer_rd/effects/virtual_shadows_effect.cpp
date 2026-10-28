@@ -66,6 +66,7 @@ VirtualShadowsEffect::VirtualShadowsEffect() {
 	enabled = GLOBAL_GET("rendering/virtual_shadows/enabled");
 	// Something valid to bind when the feature is off.
 	page_table_buffer = RD::get_singleton()->storage_buffer_create(16);
+	spot_params_buffer = RD::get_singleton()->storage_buffer_create(16); // Placeholders: the scene shader binds them even when disabled.
 	if (!enabled) {
 		return;
 	}
@@ -114,6 +115,7 @@ VirtualShadowsEffect::VirtualShadowsEffect() {
 	RD::get_singleton()->buffer_clear(request_buffer, 0, ENTRIES / 32 * sizeof(uint32_t));
 	copy_buffer = RD::get_singleton()->storage_buffer_create(uint64_t(windows_per_frame) * WINDOW_PAGES * WINDOW_PAGES * 4 * sizeof(uint32_t));
 	mark_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(MarkParams));
+	RD::get_singleton()->free_rid(spot_params_buffer);
 	spot_params_buffer = RD::get_singleton()->storage_buffer_create(sizeof(SpotParams) * SPOT_SLOTS);
 	phys_entry.resize(pool_pages);
 	phys_entry.fill(UINT32_MAX);

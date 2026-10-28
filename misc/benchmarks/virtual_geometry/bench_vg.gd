@@ -133,6 +133,29 @@ func _init() -> void:
 		if arg("omni_cube", "0") == "1":
 			omni.omni_shadow_mode = OmniLight3D.SHADOW_CUBE
 		root.add_child(omni)
+	if arg("particles", "0") == "1":
+		# Slow emissive-free particle spheres above the grid: surface-cache cards for particles.
+		var gp := GPUParticles3D.new()
+		var pm := ParticleProcessMaterial.new()
+		pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+		pm.emission_box_extents = Vector3(4, 0.5, 4)
+		pm.gravity = Vector3.ZERO
+		pm.initial_velocity_min = 0.0
+		pm.initial_velocity_max = 0.0
+		gp.process_material = pm
+		var pmesh := SphereMesh.new()
+		pmesh.radius = 0.6
+		pmesh.height = 1.2
+		var pmat := StandardMaterial3D.new()
+		pmat.albedo_color = Color(1.0, 0.2, 0.1)
+		pmesh.material = pmat
+		gp.draw_pass_1 = pmesh
+		gp.amount = 24
+		gp.lifetime = 100.0
+		gp.preprocess = 5.0
+		gp.position = Vector3(4.5, 2.5, -4.5)
+		gp.visibility_aabb = AABB(Vector3(-6, -3, -6), Vector3(12, 6, 12))
+		root.add_child(gp)
 	var side := int(ceil(sqrt(count)))
 	for i in count:
 		var mi := MeshInstance3D.new()

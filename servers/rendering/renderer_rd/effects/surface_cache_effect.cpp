@@ -34,6 +34,7 @@
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/rendering_server.h"
 
 using namespace RendererRD;
@@ -299,14 +300,16 @@ void SurfaceCacheEffect::begin_frame(uint64_t p_frame, const PagedArray<RenderGe
 	for (uint64_t i = 0; i < p_instances.size(); i++) {
 		RenderGeometryInstanceBase *gi = static_cast<RenderGeometryInstanceBase *>(p_instances[i]);
 		bool multimesh = gi->data->base_type == RSE::INSTANCE_MULTIMESH;
-		bool dynamic = multimesh || gi->data->skeleton.is_valid();
-		if ((gi->data->base_type != RSE::INSTANCE_MESH && !multimesh) || (dynamic && !dynamic_instances)) {
-			continue; // Particles are not cached yet.
+		bool particles = gi->data->base_type == RSE::INSTANCE_PARTICLES;
+		bool dynamic = multimesh || particles || gi->data->skeleton.is_valid();
+		if ((gi->data->base_type != RSE::INSTANCE_MESH && !multimesh && !particles) || (dynamic && !dynamic_instances)) {
+			continue;
 		}
 		uint32_t id;
 		HashMap<RenderGeometryInstance *, uint32_t>::Iterator it = instance_map.find(gi);
 		// Skinned meshes use the rest pose bounds: the cards are recaptured periodically but not re-fitted.
-		AABB aabb = multimesh ? mesh_storage->multimesh_get_aabb(gi->data->base) : mesh_storage->mesh_get_aabb(gi->data->base);
+		// Particles use their current emission bounds and are recaptured like other animated geometry.
+		AABB aabb = multimesh ? mesh_storage->multimesh_get_aabb(gi->data->base) : (particles ? ParticlesStorage::get_singleton()->particles_get_aabb(gi->data->base) : mesh_storage->mesh_get_aabb(gi->data->base));
 		if (it) {
 			id = it->value;
 			Instance &inst = instances[id];
