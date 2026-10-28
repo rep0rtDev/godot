@@ -371,6 +371,20 @@ func _process(_delta: float) -> bool:
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME),
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME)])
 		print("RESULT vg_shadow_tris_max=%d" % shadow_tris_max)
+		print("RESULT residency vg_pool=%d/%d vg_installed=%d vsm_pages=%d/%d vsm_req=%d vsm_miss=%d vsm_rend=%d vsm_drop=%d sc_inst=%d sc_cards=%d sc_captured=%d sc_texels=%d" % [
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_PAGE_POOL_SLOTS_USED),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_PAGE_POOL_SLOTS),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_PAGES_INSTALLED_IN_FRAME),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_SHADOW_PAGES_RESIDENT),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_SHADOW_POOL_PAGES),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_SHADOW_PAGES_REQUESTED_IN_FRAME),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_SHADOW_PAGES_MISSING_IN_FRAME),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_SHADOW_PAGES_RENDERED_IN_FRAME),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_SHADOW_PAGES_DROPPED_IN_FRAME),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_SURFACE_CACHE_INSTANCES),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_SURFACE_CACHE_CARDS),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_SURFACE_CACHE_CARDS_CAPTURED_IN_FRAME),
+			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_SURFACE_CACHE_ATLAS_TEXELS_USED)])
 		print("RESULT vg_clusters=%d vg_tris=%d vg_shadow_tris=%d total_prims=%d draw_calls=%d" % [
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_CLUSTERS_IN_FRAME),
 			RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIRTUAL_GEOMETRY_PRIMITIVES_IN_FRAME),

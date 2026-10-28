@@ -799,6 +799,14 @@ RID MeshStorage::mesh_surface_get_material(RID p_mesh, int p_surface) const {
 HashMap<uint32_t, MeshStorage::Mesh::Surface *> MeshStorage::vg_streaming_surfaces;
 uint32_t MeshStorage::vg_stream_id_counter = 0;
 MeshStorage::VGPool MeshStorage::vg_pool;
+
+uint32_t MeshStorage::vg_pool_slots_used() {
+	uint32_t used = 0;
+	for (uint32_t i = 0; i < vg_pool.slots; i++) {
+		used += vg_pool.slot_surface[i] != nullptr ? 1 : 0;
+	}
+	return used;
+}
 Mutex MeshStorage::vg_load_mutex;
 bool MeshStorage::vg_pull_supported = false;
 

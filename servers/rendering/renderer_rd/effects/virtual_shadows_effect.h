@@ -147,7 +147,7 @@ private:
 		uint32_t rendered = 0;
 		uint32_t windows_needed = 0;
 		uint32_t dropped = 0; // Requested pages that found no free physical page this frame.
-	} stats;
+	} stats, last_stats; // last_stats: the previous completed frame, for rendering info read from scripts.
 
 	static void _requests_received(const Vector<uint8_t> &p_data);
 	void _free_slot(uint32_t p_slot);
@@ -204,6 +204,9 @@ public:
 	void fill_omni_light_data(RID p_light_instance, bool p_shadows, const Transform3D &p_camera_inverse_transform, float p_pixel_scale, float *r_light_matrix, float *r_matrix, float *r_params, uint32_t *r_info) const;
 	void fill_spot_light_data(RID p_light_instance, bool p_shadows, const Transform3D &p_camera_inverse_transform, const Transform3D &p_light_transform, float p_pixel_scale, float *r_matrix, float *r_params, uint32_t *r_info) const;
 	const Stats &get_stats() const { return stats; }
+	const Stats &get_last_stats() const { return last_stats; }
+	uint32_t get_pool_pages() const { return pool_pages; }
+	uint32_t get_resident_pages() const { return pool_pages - free_list.size(); }
 
 	VirtualShadowsEffect();
 	~VirtualShadowsEffect();

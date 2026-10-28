@@ -593,6 +593,13 @@ private:
 		uint32_t installed = 0; // Pages installed in that frame.
 	};
 	static VGPool vg_pool;
+
+public:
+	static uint32_t vg_pool_slots() { return vg_pool.slots; }
+	static uint32_t vg_pool_slots_used();
+	static uint32_t vg_pool_installed(uint64_t p_frame) { return vg_pool.frame == p_frame ? vg_pool.installed : 0; }
+
+private:
 	struct VGLoadJob {
 		uint32_t stream_id = 0;
 		String path;

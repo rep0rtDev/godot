@@ -6105,6 +6105,32 @@ uint64_t RenderForwardClustered::get_virtual_geometry_info(RSE::RenderingInfo p_
 			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SOFTWARE_CLUSTERS);
 		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME:
 			return virtual_geometry->get_stat(RendererRD::VirtualGeometryEffect::STAT_SOFTWARE_TRIANGLES);
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_PAGE_POOL_SLOTS_USED:
+			return RendererRD::MeshStorage::vg_pool_slots_used();
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_PAGE_POOL_SLOTS:
+			return RendererRD::MeshStorage::vg_pool_slots();
+		case RSE::RENDERING_INFO_VIRTUAL_GEOMETRY_PAGES_INSTALLED_IN_FRAME:
+			return RendererRD::MeshStorage::vg_pool_installed(Engine::get_singleton()->get_frames_drawn());
+		case RSE::RENDERING_INFO_VIRTUAL_SHADOW_PAGES_RESIDENT:
+			return virtual_shadows ? virtual_shadows->get_resident_pages() : 0;
+		case RSE::RENDERING_INFO_VIRTUAL_SHADOW_POOL_PAGES:
+			return virtual_shadows ? virtual_shadows->get_pool_pages() : 0;
+		case RSE::RENDERING_INFO_VIRTUAL_SHADOW_PAGES_REQUESTED_IN_FRAME:
+			return virtual_shadows ? virtual_shadows->get_last_stats().requested : 0;
+		case RSE::RENDERING_INFO_VIRTUAL_SHADOW_PAGES_MISSING_IN_FRAME:
+			return virtual_shadows ? virtual_shadows->get_last_stats().missing : 0;
+		case RSE::RENDERING_INFO_VIRTUAL_SHADOW_PAGES_RENDERED_IN_FRAME:
+			return virtual_shadows ? virtual_shadows->get_last_stats().rendered : 0;
+		case RSE::RENDERING_INFO_VIRTUAL_SHADOW_PAGES_DROPPED_IN_FRAME:
+			return virtual_shadows ? virtual_shadows->get_last_stats().dropped : 0;
+		case RSE::RENDERING_INFO_SURFACE_CACHE_INSTANCES:
+			return surface_cache ? surface_cache->get_stats().instances : 0;
+		case RSE::RENDERING_INFO_SURFACE_CACHE_CARDS:
+			return surface_cache ? surface_cache->get_stats().cards : 0;
+		case RSE::RENDERING_INFO_SURFACE_CACHE_CARDS_CAPTURED_IN_FRAME:
+			return surface_cache ? surface_cache->get_stats().captured : 0;
+		case RSE::RENDERING_INFO_SURFACE_CACHE_ATLAS_TEXELS_USED:
+			return surface_cache ? surface_cache->get_stats().atlas_texels : 0;
 		default:
 			return 0;
 	}

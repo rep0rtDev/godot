@@ -6330,6 +6330,45 @@
 		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_PRIMITIVES_IN_FRAME" value="15" enum="RenderingInfo">
 			Number of triangles in [constant RENDERING_INFO_VIRTUAL_GEOMETRY_SOFTWARE_CLUSTERS_IN_FRAME].
 		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_PAGE_POOL_SLOTS_USED" value="16" enum="RenderingInfo">
+			Virtual geometry streaming pool slots currently holding a page.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_PAGE_POOL_SLOTS" value="17" enum="RenderingInfo">
+			Size of the virtual geometry streaming pool in pages ([member ProjectSettings.rendering/virtual_geometry/streaming/resident_pages]).
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_PAGES_INSTALLED_IN_FRAME" value="18" enum="RenderingInfo">
+			Virtual geometry pages uploaded into the pool during the last frame.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_SHADOW_PAGES_RESIDENT" value="19" enum="RenderingInfo">
+			Virtual shadow map pages currently allocated in the physical page pool.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_SHADOW_POOL_PAGES" value="20" enum="RenderingInfo">
+			Size of the virtual shadow map page pool in pages.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_SHADOW_PAGES_REQUESTED_IN_FRAME" value="21" enum="RenderingInfo">
+			Virtual shadow map pages the last frame asked for.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_SHADOW_PAGES_MISSING_IN_FRAME" value="22" enum="RenderingInfo">
+			Requested virtual shadow map pages that were not resident and had to be rendered or dropped.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_SHADOW_PAGES_RENDERED_IN_FRAME" value="23" enum="RenderingInfo">
+			Virtual shadow map pages rendered during the last frame.
+		</constant>
+		<constant name="RENDERING_INFO_VIRTUAL_SHADOW_PAGES_DROPPED_IN_FRAME" value="24" enum="RenderingInfo">
+			Requested virtual shadow map pages that found no free physical page; those pixels fall back to a coarser level.
+		</constant>
+		<constant name="RENDERING_INFO_SURFACE_CACHE_INSTANCES" value="25" enum="RenderingInfo">
+			Mesh instances with surface cache cards.
+		</constant>
+		<constant name="RENDERING_INFO_SURFACE_CACHE_CARDS" value="26" enum="RenderingInfo">
+			Surface cache cards allocated in the atlas.
+		</constant>
+		<constant name="RENDERING_INFO_SURFACE_CACHE_CARDS_CAPTURED_IN_FRAME" value="27" enum="RenderingInfo">
+			Surface cache cards captured (rendered) during the last frame.
+		</constant>
+		<constant name="RENDERING_INFO_SURFACE_CACHE_ATLAS_TEXELS_USED" value="28" enum="RenderingInfo">
+			Texels of the surface cache atlas occupied by cards.
+		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.
 		</constant>

@@ -142,6 +142,7 @@ void VirtualShadowsEffect::begin_frame(uint64_t p_frame) {
 	frame = p_frame;
 	windows.clear();
 	copies.clear();
+	last_stats = stats;
 	stats = Stats();
 	requests_ready = have_requests;
 	have_requests = false;
