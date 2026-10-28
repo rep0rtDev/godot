@@ -676,7 +676,15 @@ void main() {
 		hit = s_hit;
 		cascade = 0;
 	}
-	bool hit_any = found || sdf_trace(origin, dir, 200.0, hit, cascade);
+	// Rough reflections stop at the radiance cache distance and read the cache; mirror-like ones trace the full way.
+	bool rough_rc = screen.rc_params.z > 0.5 && roughness > 0.25;
+	bool hit_any = found || sdf_trace(origin, dir, rough_rc ? screen.rc_params.y : 200.0, hit, cascade);
+	if (!hit_any && rough_rc) {
+		vec3 rc;
+		if (rc_sample(origin + dir * screen.rc_params.y + normal * rc_spacing(0) * 0.5, dir, normal, rc)) {
+			radiance = rc;
+		}
+	}
 	if (hit_any && !found) {
 		vec3 hn = sdf_normal(hit, cascade);
 		float cell_size = 1.0 / sdf.cascades[cascade].w;
