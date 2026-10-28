@@ -50,7 +50,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		return;
 	}
 	debug_mode = GLOBAL_GET("rendering/global_illumination/surface_cache/debug/mode");
-	light_debug = debug_mode == 7;
+	light_debug = debug_mode == 7 ? 1 : (debug_mode == 10 ? 2 : 0);
 	atlas_size = GLOBAL_GET("rendering/global_illumination/surface_cache/atlas_size");
 	cards_per_frame = GLOBAL_GET("rendering/global_illumination/surface_cache/cards_per_frame");
 	texel_density = GLOBAL_GET("rendering/global_illumination/surface_cache/texels_per_meter");
@@ -76,6 +76,16 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 	direct = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	RD::get_singleton()->set_resource_name(direct, "Surface cache direct light");
+	final = RD::get_singleton()->texture_create(tf, RD::TextureView());
+	RD::get_singleton()->set_resource_name(final, "Surface cache final light");
+	{
+		RD::TextureFormat ptf = tf;
+		ptf.width = atlas_size / 4;
+		ptf.height = atlas_size / 4;
+		ptf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		probes = RD::get_singleton()->texture_create(ptf, RD::TextureView());
+		RD::get_singleton()->set_resource_name(probes, "Surface cache probes");
+	}
 	tf.format = RD::get_singleton()->texture_is_format_supported_for_usage(RD::DATA_FORMAT_D16_UNORM, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? RD::DATA_FORMAT_D16_UNORM : RD::DATA_FORMAT_X8_D24_UNORM_PACK32;
 	tf.usage_bits = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 	depth_stencil = RD::get_singleton()->texture_create(tf, RD::TextureView());
@@ -85,15 +95,18 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 
 	capture_list.set_page_pool(&capture_pool);
 	// Clear once so untouched atlas texels read as empty.
-	for (RID t : { albedo, normal, orm, emission, depth, direct }) {
+	for (RID t : { albedo, normal, orm, emission, depth, direct, final, probes }) {
 		RD::get_singleton()->texture_clear(t, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	}
 
-	Vector<String> modes = { "" };
+	Vector<String> modes = { "\n#define MODE_DIRECT\n", "\n#define MODE_PROBES\n", "\n#define MODE_RESOLVE\n" };
 	light_shader.initialize(modes);
 	light_shader_version = light_shader.version_create();
-	light_pipeline = RD::get_singleton()->compute_pipeline_create(light_shader.version_get_shader(light_shader_version, 0));
-	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4);
+	for (int i = 0; i < LIGHT_MODE_MAX; i++) {
+		light_pipelines[i] = RD::get_singleton()->compute_pipeline_create(light_shader.version_get_shader(light_shader_version, i));
+	}
+	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4 + sizeof(float) * 8);
+	grid_buffer = RD::get_singleton()->storage_buffer_create(GRID * GRID * GRID * GRID_SLOTS * sizeof(uint32_t));
 	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 9);
 	{
 		RD::TextureFormat dtf;
@@ -112,7 +125,7 @@ SurfaceCacheEffect::~SurfaceCacheEffect() {
 	if (light_shader_version.is_valid()) {
 		light_shader.version_free(light_shader_version);
 	}
-	for (RID rid : { framebuffer, depth_stencil, depth, direct, emission, orm, normal, albedo, card_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex }) {
+	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -206,59 +219,61 @@ void SurfaceCacheEffect::_card_view(const Instance &p_inst, int p_axis, Transfor
 void SurfaceCacheEffect::_build_cards(uint32_t p_instance) {
 	Instance &inst = instances[p_instance];
 	_drop_cards(p_instance);
+	if (inst.first_card == 0xFFFFFFFF) {
+		if (free_blocks.size()) {
+			inst.first_card = free_blocks[free_blocks.size() - 1];
+			free_blocks.resize(free_blocks.size() - 1);
+		} else {
+			inst.first_card = cards.size();
+			cards.resize(cards.size() + 6);
+		}
+	}
 	const Basis &b = inst.transform.basis;
 	Vector3 extent(inst.aabb.size.x * b.get_column(0).length(), inst.aabb.size.y * b.get_column(1).length(), inst.aabb.size.z * b.get_column(2).length());
-	inst.first_card = cards.size();
-	inst.card_count = 0;
-	LocalVector<uint32_t> ids;
 	for (int axis = 0; axis < 6; axis++) {
+		Card &c = cards[inst.first_card + axis];
+		c = Card();
+		c.instance_id = p_instance;
+		c.axis = axis;
 		int a = axis / 2;
 		// A face thinner than a texel in either direction is not worth a card.
 		if (extent[(a + 1) % 3] * texel_density < 1.0f || extent[(a + 2) % 3] * texel_density < 1.0f) {
 			continue;
 		}
-		Card c;
-		c.instance_id = p_instance;
-		c.axis = axis;
 		if (!_allocate_rect(_card_size(extent, axis), c.rect)) {
+			c.rect = Rect2i();
 			continue;
 		}
 		_card_view(inst, axis, c.capture_transform, c.capture_projection);
-		uint32_t id;
-		if (free_cards.size()) {
-			id = free_cards[free_cards.size() - 1];
-			free_cards.resize(free_cards.size() - 1);
-			cards[id] = c;
-		} else {
-			id = cards.size();
-			cards.push_back(c);
-		}
-		ids.push_back(id);
 	}
-	// Cards of one instance are kept contiguous in the id list stored on the instance.
-	inst.first_card = ids.size() ? ids[0] : 0;
-	inst.card_count = ids.size();
-	if (ids.size() > 1) {
-		for (uint32_t i = 1; i < ids.size(); i++) {
-			if (ids[i] != ids[0] + i) {
-				// Non-contiguous: fall back to marking by instance id during iteration.
-				inst.first_card = 0xFFFFFFFF;
-				break;
-			}
-		}
-	}
+	grid_dirty = true;
 }
 
 void SurfaceCacheEffect::_drop_cards(uint32_t p_instance) {
-	for (uint32_t i = 0; i < cards.size(); i++) {
-		if (cards[i].instance_id == p_instance && cards[i].rect.size != Size2i()) {
-			_free_rect(cards[i].rect);
-			cards[i].rect = Rect2i();
-			cards[i].instance_id = 0xFFFFFFFF;
-			free_cards.push_back(i);
-		}
+	Instance &inst = instances[p_instance];
+	if (inst.first_card == 0xFFFFFFFF) {
+		return;
 	}
-	instances[p_instance].card_count = 0;
+	for (int axis = 0; axis < 6; axis++) {
+		Card &c = cards[inst.first_card + axis];
+		if (c.rect.size != Size2i()) {
+			_free_rect(c.rect);
+		}
+		c.rect = Rect2i();
+	}
+	grid_dirty = true;
+}
+
+void SurfaceCacheEffect::_free_block(uint32_t p_instance) {
+	Instance &inst = instances[p_instance];
+	_drop_cards(p_instance);
+	if (inst.first_card != 0xFFFFFFFF) {
+		for (int axis = 0; axis < 6; axis++) {
+			cards[inst.first_card + axis].instance_id = 0xFFFFFFFF;
+		}
+		free_blocks.push_back(inst.first_card);
+		inst.first_card = 0xFFFFFFFF;
+	}
 }
 
 void SurfaceCacheEffect::begin_frame(uint64_t p_frame, const PagedArray<RenderGeometryInstance *> &p_instances, const Vector3 &p_camera_position) {
@@ -309,13 +324,18 @@ void SurfaceCacheEffect::begin_frame(uint64_t p_frame, const PagedArray<RenderGe
 	}
 	for (RenderGeometryInstance *g : stale) {
 		uint32_t id = instance_map[g];
-		_drop_cards(id);
+		_free_block(id);
 		instances[id].geometry = nullptr;
 		free_instances.push_back(id);
 		instance_map.erase(g);
 	}
 	stats.instances = instance_map.size();
-	stats.cards = cards.size() - free_cards.size();
+	stats.cards = 0;
+	for (const Card &c : cards) {
+		if (c.instance_id != 0xFFFFFFFF && c.rect.size != Size2i()) {
+			stats.cards++;
+		}
+	}
 	stats.captured = 0;
 	stats.lit = 0;
 	captured_this_frame.clear();
@@ -367,7 +387,7 @@ void SurfaceCacheEffect::capture(CaptureFunction p_capture, void *p_userdata) {
 	capture_list.clear();
 }
 
-void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult) {
+void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult, const Vector3 &p_sky_radiance) {
 	// Cards to light: captured this frame plus every light_share-th resident card.
 	LocalVector<uint32_t> todo;
 	for (uint32_t id : captured_this_frame) {
@@ -387,6 +407,7 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 	struct CardData {
 		int32_t rect[4];
 		float view_to_world[16];
+		float world_to_view[16];
 		float extents[4];
 	};
 	LocalVector<CardData> gpu_cards;
@@ -399,6 +420,7 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		d.rect[2] = c.rect.size.x;
 		d.rect[3] = c.rect.size.y;
 		MaterialStorage::store_transform(c.capture_transform, d.view_to_world);
+		MaterialStorage::store_transform(c.capture_transform.affine_inverse(), d.world_to_view);
 		// Orthographic extents from the projection: x = 1/m00, y = 1/m11, depth range = zfar.
 		d.extents[0] = c.capture_projection.columns[0][0] != 0.0f ? 1.0f / c.capture_projection.columns[0][0] : 0.0f;
 		d.extents[1] = c.capture_projection.columns[1][1] != 0.0f ? 1.0f / c.capture_projection.columns[1][1] : 0.0f;
@@ -406,24 +428,106 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		d.extents[3] = 0.0f;
 	}
 	uint32_t needed = gpu_cards.size() * sizeof(CardData);
+	bool sets_dirty = false;
 	if (card_buffer.is_null() || card_buffer_size < needed) {
 		if (card_buffer.is_valid()) {
 			RD::get_singleton()->free_rid(card_buffer);
 		}
 		card_buffer_size = MAX(needed, 64u * uint32_t(sizeof(CardData)));
 		card_buffer = RD::get_singleton()->storage_buffer_create(card_buffer_size);
+		sets_dirty = true;
 	}
 	RD::get_singleton()->buffer_update(card_buffer, 0, needed, gpu_cards.ptr());
+
+	struct InstanceData {
+		float world_to_local[16];
+		float aabb_min[4];
+		float aabb_size[4];
+		uint32_t info[4];
+	};
+	LocalVector<InstanceData> gpu_instances;
+	gpu_instances.resize(MAX(instances.size(), 1u));
+	for (uint32_t i = 0; i < instances.size(); i++) {
+		const Instance &inst = instances[i];
+		InstanceData &d = gpu_instances[i];
+		MaterialStorage::store_transform(inst.transform.affine_inverse(), d.world_to_local);
+		for (int k = 0; k < 3; k++) {
+			d.aabb_min[k] = inst.aabb.position[k];
+			d.aabb_size[k] = inst.aabb.size[k];
+		}
+		d.aabb_min[3] = d.aabb_size[3] = 0.0f;
+		d.info[0] = inst.first_card;
+		d.info[1] = (inst.geometry != nullptr && inst.first_card != 0xFFFFFFFF) ? 1 : 0;
+		d.info[2] = d.info[3] = 0;
+	}
+	needed = gpu_instances.size() * sizeof(InstanceData);
+	if (instance_buffer.is_null() || instance_buffer_size < needed) {
+		if (instance_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(instance_buffer);
+		}
+		instance_buffer_size = MAX(needed, 64u * uint32_t(sizeof(InstanceData)));
+		instance_buffer = RD::get_singleton()->storage_buffer_create(instance_buffer_size);
+		sets_dirty = true;
+	}
+	RD::get_singleton()->buffer_update(instance_buffer, 0, needed, gpu_instances.ptr());
+
+	// Object grid around the camera, snapped to cells so a still camera keeps it.
+	Vector3 origin = ((camera_position - Vector3(1, 1, 1) * (grid_cell * GRID * 0.5f)) / grid_cell).floor() * grid_cell;
+	if (grid_dirty || origin != grid_origin) {
+		grid_origin = origin;
+		grid_dirty = false;
+		LocalVector<uint32_t> grid;
+		grid.resize(GRID * GRID * GRID * GRID_SLOTS);
+		for (uint32_t i = 0; i < grid.size(); i++) {
+			grid[i] = 0xFFFFFFFF;
+		}
+		for (uint32_t i = 0; i < instances.size(); i++) {
+			const Instance &inst = instances[i];
+			if (inst.geometry == nullptr || inst.first_card == 0xFFFFFFFF) {
+				continue;
+			}
+			AABB world = inst.transform.xform(inst.aabb).grow(grid_cell * 0.5f);
+			Vector3i lo = Vector3i(((world.position - grid_origin) / grid_cell).floor());
+			Vector3i hi = Vector3i(((world.position + world.size - grid_origin) / grid_cell).floor());
+			lo = lo.maxi(0);
+			hi = hi.mini(GRID - 1);
+			for (int z = lo.z; z <= hi.z; z++) {
+				for (int y = lo.y; y <= hi.y; y++) {
+					for (int x = lo.x; x <= hi.x; x++) {
+						uint32_t base = ((z * GRID + y) * GRID + x) * GRID_SLOTS;
+						for (uint32_t s = 0; s < GRID_SLOTS; s++) {
+							if (grid[base + s] == 0xFFFFFFFF) {
+								grid[base + s] = i;
+								break;
+							}
+						}
+					}
+				}
+			}
+		}
+		RD::get_singleton()->buffer_update(grid_buffer, 0, grid.size() * sizeof(uint32_t), grid.ptr());
+	}
 
 	struct Params {
 		float view_to_world[16];
 		uint32_t counts[4];
+		float grid[4];
+		float sky[4];
 	} params;
 	MaterialStorage::store_transform(p_view_to_world, params.view_to_world);
 	params.counts[0] = p_directional_count;
 	params.counts[1] = p_omni_count;
 	params.counts[2] = p_spot_count;
 	params.counts[3] = p_sdf_cascades.size() > 0 ? 1 : 0;
+	params.grid[0] = grid_origin.x;
+	params.grid[1] = grid_origin.y;
+	params.grid[2] = grid_origin.z;
+	params.grid[3] = grid_cell;
+	params.sky[0] = p_sky_radiance.x;
+	params.sky[1] = p_sky_radiance.y;
+	params.sky[2] = p_sky_radiance.z;
+	params.sky[3] = float(frame % 4096);
+	RD::get_singleton()->buffer_update(light_params_buffer, 0, sizeof(Params), &params);
 	{
 		float sdf_params[4 * 9] = {};
 		sdf_params[0] = float(p_sdf_grid_size);
@@ -437,34 +541,39 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		}
 		RD::get_singleton()->buffer_update(sdf_params_buffer, 0, sizeof(sdf_params), sdf_params);
 	}
-	RD::get_singleton()->buffer_update(light_params_buffer, 0, sizeof(Params), &params);
 
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
-	RID shader = light_shader.version_get_shader(light_shader_version, 0);
-	Vector<RD::Uniform> uniforms;
-	auto add = [&](RD::UniformType p_type, int p_binding, RID p_rid) {
-		RD::Uniform u;
-		u.uniform_type = p_type;
-		u.binding = p_binding;
-		u.append_id(p_rid);
-		uniforms.push_back(u);
-	};
-	add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, card_buffer);
-	add(RD::UNIFORM_TYPE_TEXTURE, 1, albedo);
-	add(RD::UNIFORM_TYPE_TEXTURE, 2, normal);
-	add(RD::UNIFORM_TYPE_TEXTURE, 3, depth);
-	add(RD::UNIFORM_TYPE_TEXTURE, 4, emission);
-	add(RD::UNIFORM_TYPE_IMAGE, 5, direct);
-	add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, p_directional_buffer); // Directional lights live in a UBO in LightStorage.
-	add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_omni_buffer);
-	add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_spot_buffer);
-	add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, light_params_buffer);
-	add(RD::UNIFORM_TYPE_SAMPLER, 10, material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
-	add(RD::UNIFORM_TYPE_SAMPLER, 11, material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
-	if (light_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(light_uniform_set)) {
+	RID shader = light_shader.version_get_shader(light_shader_version, LIGHT_MODE_DIRECT);
+	if (sets_dirty || light_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(light_uniform_set)) {
+		Vector<RD::Uniform> uniforms;
+		auto add = [&](RD::UniformType p_type, int p_binding, RID p_rid) {
+			RD::Uniform u;
+			u.uniform_type = p_type;
+			u.binding = p_binding;
+			u.append_id(p_rid);
+			uniforms.push_back(u);
+		};
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, card_buffer);
+		add(RD::UNIFORM_TYPE_TEXTURE, 1, albedo);
+		add(RD::UNIFORM_TYPE_TEXTURE, 2, normal);
+		add(RD::UNIFORM_TYPE_TEXTURE, 3, depth);
+		add(RD::UNIFORM_TYPE_TEXTURE, 4, emission);
+		add(RD::UNIFORM_TYPE_IMAGE, 5, direct);
+		add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, p_directional_buffer); // Directional lights live in a UBO in LightStorage.
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_omni_buffer);
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_spot_buffer);
+		add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, light_params_buffer);
+		add(RD::UNIFORM_TYPE_SAMPLER, 10, material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+		add(RD::UNIFORM_TYPE_SAMPLER, 11, material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, instance_buffer);
+		add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, grid_buffer);
+		add(RD::UNIFORM_TYPE_IMAGE, 14, probes);
+		add(RD::UNIFORM_TYPE_IMAGE, 15, final);
+		if (light_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(light_uniform_set)) {
+			RD::get_singleton()->free_rid(light_uniform_set);
+		}
 		light_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, shader, 0);
 	}
-	RID set0 = light_uniform_set;
 
 	Vector<RID> sdf_textures;
 	for (int i = 0; i < 8; i++) {
@@ -492,15 +601,21 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 	}
 
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
-	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipeline);
-	RD::get_singleton()->compute_list_bind_uniform_set(cl, set0, 0);
-	RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
-	for (uint32_t id : todo) {
-		const Card &c = cards[id];
-		uint32_t pc[4] = { id, light_debug ? 1u : 0u, 0, 0 };
-		RD::get_singleton()->compute_list_set_push_constant(cl, pc, sizeof(pc));
-		RD::get_singleton()->compute_list_dispatch(cl, Math::division_round_up(uint32_t(c.rect.size.x), 8u), Math::division_round_up(uint32_t(c.rect.size.y), 8u), 1);
-		stats.lit++;
+	for (int mode = 0; mode < LIGHT_MODE_MAX; mode++) {
+		RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[mode]);
+		RD::get_singleton()->compute_list_bind_uniform_set(cl, light_uniform_set, 0);
+		RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
+		for (uint32_t id : todo) {
+			const Card &c = cards[id];
+			uint32_t pc[4] = { id, light_debug, 0, 0 };
+			RD::get_singleton()->compute_list_set_push_constant(cl, pc, sizeof(pc));
+			uint32_t div = mode == LIGHT_MODE_PROBES ? 32 : 8;
+			RD::get_singleton()->compute_list_dispatch(cl, Math::division_round_up(uint32_t(c.rect.size.x), div), Math::division_round_up(uint32_t(c.rect.size.y), div), 1);
+			if (mode == LIGHT_MODE_DIRECT) {
+				stats.lit++;
+			}
+		}
+		RD::get_singleton()->compute_list_add_barrier(cl);
 	}
 	RD::get_singleton()->compute_list_end();
 }

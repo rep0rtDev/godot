@@ -154,7 +154,8 @@ func _init() -> void:
 		env.background_mode = Environment.BG_COLOR
 		env.background_color = Color(0.2, 0.2, 0.25)
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		env.ambient_light_color = Color(0.2, 0.2, 0.25)
+		var amb := float(arg("ambient", "-1"))
+		env.ambient_light_color = Color(0.2, 0.2, 0.25) if amb < 0.0 else Color(amb, amb, amb)
 		env.sdfgi_enabled = true
 		env.sdfgi_cascades = 4
 		env.sdfgi_min_cell_size = 0.2

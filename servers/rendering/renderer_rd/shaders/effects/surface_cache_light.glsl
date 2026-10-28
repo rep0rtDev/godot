@@ -4,22 +4,35 @@
 
 #VERSION_DEFINES
 
-// Surface cache direct lighting: one dispatch per card, one thread per atlas texel. World position and normal come
-// from the captured depth and view-space normal of the card. Lights come from the scene light buffers (camera view
-// space) and shadows from sphere tracing the SDFGI cascades when present.
+// Surface cache lighting. One dispatch per card in each of three modes:
+//  MODE_DIRECT: every atlas texel gets Lambert direct light from the scene lights, shadowed by sphere tracing the
+//               SDFGI cascades (a global SDF). Positions come from the captured depth and the capture camera.
+//  MODE_PROBES: one radiosity probe per 4x4 texels traces cosine rays through the SDF; hits read the final lighting
+//               of the surface cache through an object grid, misses read the sky term. Accumulated over frames.
+//  MODE_RESOLVE: final = direct + albedo * bilinear(probes).
 
 #define MAX_CASCADES 8
+#define GRID 32
+#define GRID_SLOTS 8
+#define PROBE_RAYS 8
+#define M_PI 3.14159265359
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 #include "../light_data_inc.glsl"
 
-#define M_PI 3.14159265359
-
 struct CardData {
 	ivec4 rect;
 	mat4 view_to_world; // Capture camera to world.
+	mat4 world_to_view;
 	vec4 extents; // half width, half height, depth range, unused.
+};
+
+struct InstanceData {
+	mat4 world_to_local;
+	vec4 aabb_min;
+	vec4 aabb_size;
+	uvec4 info; // first card, valid, unused, unused.
 };
 
 layout(set = 0, binding = 0, std430) restrict readonly buffer Cards {
@@ -31,7 +44,7 @@ layout(set = 0, binding = 1) uniform texture2D albedo_tex;
 layout(set = 0, binding = 2) uniform texture2D normal_tex;
 layout(set = 0, binding = 3) uniform texture2D depth_tex;
 layout(set = 0, binding = 4) uniform texture2D emission_tex;
-layout(set = 0, binding = 5, rgba16f) uniform restrict writeonly image2D direct_image;
+layout(set = 0, binding = 5, rgba16f) uniform restrict image2D direct_image;
 
 #define MAX_DIRECTIONAL_LIGHTS 8
 
@@ -53,11 +66,26 @@ spot_lights;
 layout(set = 0, binding = 9, std140) uniform Params {
 	mat4 view_to_world; // Camera view space (light buffers) to world.
 	uvec4 counts; // directional, omni, spot, use_sdf
+	vec4 grid; // Object grid origin, cell size.
+	vec4 sky; // Sky radiance for missed rays, frame number.
 }
 params;
 
 layout(set = 0, binding = 10) uniform sampler linear_sampler;
 layout(set = 0, binding = 11) uniform sampler nearest_sampler;
+
+layout(set = 0, binding = 12, std430) restrict readonly buffer Instances {
+	InstanceData data[];
+}
+instances;
+
+layout(set = 0, binding = 13, std430) restrict readonly buffer ObjectGrid {
+	uint data[]; // GRID^3 cells of GRID_SLOTS instance ids, 0xFFFFFFFF ends a cell.
+}
+object_grid;
+
+layout(set = 0, binding = 14, rgba16f) uniform restrict image2D probe_image;
+layout(set = 0, binding = 15, rgba16f) uniform restrict image2D final_image;
 
 // SDFGI cascades as a global SDF. info: grid size in cells, y_mult, cascade count. cascades: world offset of cell
 // (0,0,0) in y-scaled space and 1 / cell size.
@@ -76,7 +104,7 @@ layout(push_constant, std430) uniform Push {
 }
 push;
 
-// Finest cascade containing p, or -1.
+// Finest cascade containing p (y-scaled space), or -1.
 int find_cascade(vec3 p) {
 	for (uint j = 0; j < uint(sdf.info.z); j++) {
 		vec3 c = (p - sdf.cascades[j].xyz) * sdf.cascades[j].w;
@@ -87,37 +115,75 @@ int find_cascade(vec3 p) {
 	return -1;
 }
 
-// 1 lit, 0 blocked. Sphere tracing through the SDF cascades from origin toward dir up to max_dist.
-float sdf_shadow(vec3 origin, vec3 dir, float max_dist) {
+float sdf_sample(vec3 p, int j) {
+	vec3 uvw = (p - sdf.cascades[j].xyz) * sdf.cascades[j].w / sdf.info.x;
+	return texture(sampler3D(sdf_cascades[j], linear_sampler), uvw).r * 255.0 - 1.0; // Cells.
+}
+
+// Sphere trace from origin along dir (world space). Returns true on a hit with the hit point and its cascade.
+bool sdf_trace(vec3 origin, vec3 dir, float max_dist, out vec3 r_hit, out int r_cascade) {
+	r_cascade = -1;
 	if (params.counts.w == 0u) {
-		return 1.0;
+		return false;
 	}
-	// The SDF is built with world y scaled by y_mult.
-	origin.y *= sdf.info.y;
-	dir.y *= sdf.info.y;
+	float y_mult = sdf.info.y;
+	origin.y *= y_mult;
+	dir.y *= y_mult;
 	float dir_len = length(dir);
 	dir /= dir_len;
 	max_dist *= dir_len;
 	int j = find_cascade(origin);
 	if (j < 0) {
-		return 1.0;
+		return false;
 	}
-	// Leave the surface: two cells of the finest cascade.
-	float t = 2.0 / sdf.cascades[j].w;
-	for (int i = 0; i < 64 && t < max_dist; i++) {
+	// The ray starts on a surface the SDF only resolves to a cell: a hit counts once the ray has been a full cell
+	// away from any surface, so grazing rays do not hit their own surface.
+	float t = 1.0 / sdf.cascades[j].w;
+	bool left_surface = false;
+	for (int i = 0; i < 96 && t < max_dist; i++) {
 		vec3 p = origin + dir * t;
 		j = find_cascade(p);
 		if (j < 0) {
-			return 1.0;
+			return false;
 		}
-		vec3 uvw = (p - sdf.cascades[j].xyz) * sdf.cascades[j].w / sdf.info.x;
-		float d = texture(sampler3D(sdf_cascades[j], linear_sampler), uvw).r * 255.0 - 1.0;
-		if (d < 0.5) {
-			return 0.0;
+		float d = sdf_sample(p, j);
+		left_surface = left_surface || d >= 1.0;
+		if (d < 0.5 && left_surface) {
+			r_hit = p;
+			r_hit.y /= y_mult;
+			r_cascade = j;
+			return true;
 		}
-		t += max(d, 1.0) / sdf.cascades[j].w;
+		// Distances near a cascade border do not know about surfaces outside it: never step past the border, the
+		// next sample then comes from the coarser cascade.
+		vec3 c = (p - sdf.cascades[j].xyz) * sdf.cascades[j].w;
+		vec3 inv_dir = 1.0 / (abs(dir) + 1e-6) * sign(dir + 1e-7);
+		vec3 t_exit = max((vec3(1.0) - c) * inv_dir, (vec3(sdf.info.x - 1.0) - c) * inv_dir);
+		float exit_cells = max(min(t_exit.x, min(t_exit.y, t_exit.z)), 0.0);
+		t += min(max(d, 1.0), exit_cells + 0.05) / sdf.cascades[j].w;
 	}
-	return 1.0;
+	return false;
+}
+
+// 1 lit, 0 blocked.
+float sdf_shadow(vec3 origin, vec3 dir, float max_dist) {
+	vec3 hit;
+	int c;
+	return sdf_trace(origin, dir, max_dist, hit, c) ? 0.0 : 1.0;
+}
+
+// World-space normal of the SDF at a hit point.
+vec3 sdf_normal(vec3 p, int j) {
+	float y_mult = sdf.info.y;
+	p.y *= y_mult;
+	float h = 1.0 / sdf.cascades[j].w;
+	vec3 g = vec3(
+			sdf_sample(p + vec3(h, 0, 0), j) - sdf_sample(p - vec3(h, 0, 0), j),
+			sdf_sample(p + vec3(0, h, 0), j) - sdf_sample(p - vec3(0, h, 0), j),
+			sdf_sample(p + vec3(0, 0, h), j) - sdf_sample(p - vec3(0, 0, h), j));
+	g.y *= y_mult;
+	float l = length(g);
+	return l > 0.0 ? g / l : vec3(0, 1, 0);
 }
 
 float omni_attenuation(float dist, float inv_range, float decay) {
@@ -129,33 +195,116 @@ float omni_attenuation(float dist, float inv_range, float decay) {
 	return nd * pow(max(dist, 0.0001), -decay);
 }
 
-void main() {
-	CardData card = cards.data[push.card];
-	ivec2 local = ivec2(gl_GlobalInvocationID.xy);
-	if (any(greaterThanEqual(local, card.rect.zw))) {
-		return;
-	}
-	ivec2 texel = card.rect.xy + local;
-	vec4 albedo = texelFetch(sampler2D(albedo_tex, nearest_sampler), texel, 0);
-	float depth = texelFetch(sampler2D(depth_tex, nearest_sampler), texel, 0).r;
+// Position, normal and albedo of a card texel. False when the texel saw no geometry.
+bool card_texel(CardData card, ivec2 local, out vec3 r_world, out vec3 r_normal, out vec4 r_albedo, out ivec2 r_texel) {
+	r_texel = card.rect.xy + local;
+	float depth = texelFetch(sampler2D(depth_tex, nearest_sampler), r_texel, 0).r;
 	if (depth <= 0.0 || depth >= card.extents.z) {
-		imageStore(direct_image, texel, vec4(0.0));
-		return;
+		return false;
 	}
-	vec3 n_view = texelFetch(sampler2D(normal_tex, nearest_sampler), texel, 0).xyz * 2.0 - 1.0;
+	r_albedo = texelFetch(sampler2D(albedo_tex, nearest_sampler), r_texel, 0);
+	vec3 n_view = texelFetch(sampler2D(normal_tex, nearest_sampler), r_texel, 0).xyz * 2.0 - 1.0;
 	vec2 ndc = (vec2(local) + 0.5) / vec2(card.rect.zw) * 2.0 - 1.0;
 	ndc.y = -ndc.y; // Atlas rows go down, view y goes up.
 	vec3 p_view = vec3(ndc.x * card.extents.x, ndc.y * card.extents.y, -depth);
-	vec3 world = (card.view_to_world * vec4(p_view, 1.0)).xyz;
-	vec3 normal = normalize(mat3(card.view_to_world) * n_view);
-	if (normal.z < 0.0 && n_view.z < 0.0) {
+	r_world = (card.view_to_world * vec4(p_view, 1.0)).xyz;
+	r_normal = normalize(mat3(card.view_to_world) * n_view);
+	if (n_view.z < 0.0) {
 		// Back face captured through a single-sided surface: flip toward the card.
-		normal = -normal;
+		r_normal = -r_normal;
+	}
+	return true;
+}
+
+// Final lighting of the surface cache at a world point with the given normal; false when no card covers it.
+bool sample_cards(vec3 p, vec3 n, float tolerance, out vec3 r_radiance) {
+	r_radiance = vec3(0.0);
+	ivec3 cell = ivec3(floor((p - params.grid.xyz) / params.grid.w));
+	if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, ivec3(GRID)))) {
+		return false;
+	}
+	uint base = uint((cell.z * GRID + cell.y) * GRID + cell.x) * uint(GRID_SLOTS);
+	for (uint s = 0; s < uint(GRID_SLOTS); s++) {
+		uint inst_id = object_grid.data[base + s];
+		if (inst_id == 0xFFFFFFFFu) {
+			break;
+		}
+		InstanceData inst = instances.data[inst_id];
+		vec3 lp = (inst.world_to_local * vec4(p, 1.0)).xyz;
+		vec3 size = max(inst.aabb_size.xyz, vec3(0.05));
+		vec3 rel = (lp - inst.aabb_min.xyz) / size;
+		vec3 margin = vec3(tolerance) / size;
+		if (any(lessThan(rel, -margin)) || any(greaterThan(rel, 1.0 + margin))) {
+			continue;
+		}
+		vec3 ln = normalize(mat3(inst.world_to_local) * n);
+		vec3 a = abs(ln);
+		// Try the three axes in order of alignment with the normal.
+		for (int k = 0; k < 3; k++) {
+			int axis = a.x >= a.y && a.x >= a.z ? 0 : (a.y >= a.z ? 1 : 2);
+			a[axis] = -1.0;
+			uint card_index = inst.info.x + uint(axis * 2 + (ln[axis] < 0.0 ? 1 : 0));
+			CardData c = cards.data[card_index];
+			if (c.rect.z == 0) {
+				continue;
+			}
+			vec3 v = (c.world_to_view * vec4(p, 1.0)).xyz;
+			vec2 uv = vec2(v.x / c.extents.x, -v.y / c.extents.y) * 0.5 + 0.5;
+			if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) {
+				continue;
+			}
+			ivec2 t = c.rect.xy + clamp(ivec2(uv * vec2(c.rect.zw)), ivec2(0), c.rect.zw - 1);
+			float cd = texelFetch(sampler2D(depth_tex, nearest_sampler), t, 0).r;
+			if (cd <= 0.0 || cd >= c.extents.z) {
+				continue;
+			}
+			float texel_size = 2.0 * c.extents.x / float(c.rect.z);
+			if (abs(cd - (-v.z)) > max(tolerance, 2.0 * texel_size)) {
+				continue; // The card sees another surface here.
+			}
+			r_radiance = imageLoad(final_image, t).rgb;
+			return true;
+		}
+	}
+	return false;
+}
+
+float hash1(vec3 p) {
+	p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+	p += dot(p, p.yxz + 33.33);
+	return fract((p.x + p.y) * p.z);
+}
+
+void main() {
+	CardData card = cards.data[push.card];
+	ivec2 local = ivec2(gl_GlobalInvocationID.xy);
+
+#ifdef MODE_DIRECT
+	if (any(greaterThanEqual(local, card.rect.zw))) {
+		return;
+	}
+	vec3 world, normal;
+	vec4 albedo;
+	ivec2 texel;
+	if (!card_texel(card, local, world, normal, albedo, texel)) {
+		imageStore(direct_image, card.rect.xy + local, vec4(0.0));
+		return;
 	}
 	vec3 emission = texelFetch(sampler2D(emission_tex, nearest_sampler), texel, 0).rgb;
 	vec3 light = vec3(0.0);
 	mat3 view_rot = mat3(params.view_to_world);
 	vec3 origin = world + normal * 0.02;
+
+	if (push.debug == 1u) {
+		// Diagnostics: cascade containing the texel, SDF distance there (cells / 16), shadow toward the first light.
+		vec3 so = origin;
+		so.y *= sdf.info.y;
+		int j = find_cascade(so);
+		float d = j >= 0 ? sdf_sample(so, j) : -1.0;
+		float sh = params.counts.x > 0u ? sdf_shadow(origin, normalize(view_rot * directional_lights.data[0].direction), 100.0) : -1.0;
+		imageStore(direct_image, texel, vec4(float(j + 1) / 8.0, d / 16.0, sh, 1.0));
+		return;
+	}
 
 	for (uint i = 0; i < params.counts.x; i++) {
 		vec3 l = normalize(view_rot * directional_lights.data[i].direction);
@@ -214,19 +363,94 @@ void main() {
 		}
 		light += spot_lights.data[i].color * omni_attenuation(dist, spot_lights.data[i].inv_radius, spot_lights.data[i].attenuation) * spot_att * ndotl * shadow;
 	}
-	if (push.debug != 0u) {
-		// Diagnostics: cascade containing the texel, SDF distance there (cells / 16), shadow toward the first light.
-		vec3 so = origin;
-		so.y *= sdf.info.y;
-		int j = find_cascade(so);
-		float d = -1.0;
-		if (j >= 0) {
-			vec3 uvw = (so - sdf.cascades[j].xyz) * sdf.cascades[j].w / sdf.info.x;
-			d = texture(sampler3D(sdf_cascades[j], linear_sampler), uvw).r * 255.0 - 1.0;
-		}
-		float sh = params.counts.x > 0u ? sdf_shadow(origin, normalize(view_rot * directional_lights.data[0].direction), 100.0) : -1.0;
-		imageStore(direct_image, texel, vec4(float(j + 1) / 8.0, d / 16.0, sh, 1.0));
+	imageStore(direct_image, texel, vec4(albedo.rgb * light / M_PI + emission, 1.0));
+#endif
+
+#ifdef MODE_PROBES
+	ivec2 probe_count = card.rect.zw / 4;
+	if (any(greaterThanEqual(local, probe_count))) {
 		return;
 	}
-	imageStore(direct_image, texel, vec4(albedo.rgb * light / M_PI + emission, 1.0));
+	ivec2 probe_texel = card.rect.xy / 4 + local;
+	// First texel of the 4x4 block that saw geometry hosts the probe.
+	vec3 world, normal;
+	vec4 albedo;
+	ivec2 texel;
+	bool valid = false;
+	for (int i = 0; i < 16 && !valid; i++) {
+		valid = card_texel(card, local * 4 + ivec2(i % 4, i / 4), world, normal, albedo, texel);
+	}
+	if (!valid) {
+		imageStore(probe_image, probe_texel, vec4(0.0));
+		return;
+	}
+	vec3 origin = world + normal * 0.02;
+	vec3 tangent = normalize(abs(normal.y) < 0.99 ? cross(normal, vec3(0, 1, 0)) : cross(normal, vec3(1, 0, 0)));
+	vec3 bitangent = cross(normal, tangent);
+	vec3 sum = vec3(0.0);
+	float frame = params.sky.w;
+	int hits = 0;
+	int found = 0;
+	for (int r = 0; r < PROBE_RAYS; r++) {
+		vec2 u = vec2(hash1(vec3(probe_texel, frame * float(PROBE_RAYS) + float(r))), hash1(vec3(probe_texel.yx, frame * float(PROBE_RAYS) + float(r) + 17.0)));
+		// Cosine-weighted hemisphere.
+		float phi = 2.0 * M_PI * u.x;
+		float sr = sqrt(u.y);
+		vec3 dir = tangent * (cos(phi) * sr) + bitangent * (sin(phi) * sr) + normal * sqrt(max(0.0, 1.0 - u.y));
+		vec3 hit;
+		int cascade;
+		vec3 radiance = params.sky.rgb;
+		if (sdf_trace(origin, dir, 100.0, hit, cascade)) {
+			hits++;
+			vec3 hn = sdf_normal(hit, cascade);
+			float cell = 1.0 / sdf.cascades[cascade].w;
+			if (sample_cards(hit, hn, 1.5 * cell, radiance)) {
+				found++;
+			} else {
+				radiance = vec3(0.0); // Hit something without a card: unknown, treat as dark.
+			}
+		}
+		sum += radiance;
+	}
+	// Cosine sampling: irradiance = pi * mean radiance; the resolve multiplies by albedo / pi, so store the mean.
+	vec3 mean = sum / float(PROBE_RAYS);
+	if (push.debug == 2u) {
+		// Diagnostics: fraction of rays that hit the SDF, fraction that found a card, mean radiance.
+		imageStore(probe_image, probe_texel, vec4(float(hits) / float(PROBE_RAYS), float(found) / float(PROBE_RAYS), dot(mean, vec3(1.0 / 3.0)), 1.0));
+		return;
+	}
+	vec4 prev = imageLoad(probe_image, probe_texel);
+	float w = prev.a > 0.0 ? 0.25 : 1.0;
+	imageStore(probe_image, probe_texel, vec4(mix(prev.rgb, mean, w), 1.0));
+#endif
+
+#ifdef MODE_RESOLVE
+	if (any(greaterThanEqual(local, card.rect.zw))) {
+		return;
+	}
+	ivec2 texel = card.rect.xy + local;
+	vec4 direct = imageLoad(direct_image, texel);
+	if (direct.a <= 0.0) {
+		imageStore(final_image, texel, vec4(0.0));
+		return;
+	}
+	vec4 albedo = texelFetch(sampler2D(albedo_tex, nearest_sampler), texel, 0);
+	ivec2 probe_count = card.rect.zw / 4;
+	ivec2 probe_base = card.rect.xy / 4;
+	vec2 pf = (vec2(local) - 1.5) / 4.0;
+	ivec2 p0 = clamp(ivec2(floor(pf)), ivec2(0), probe_count - 1);
+	ivec2 p1 = min(p0 + 1, probe_count - 1);
+	vec2 f = clamp(pf - vec2(p0), 0.0, 1.0);
+	vec4 s00 = imageLoad(probe_image, probe_base + p0);
+	vec4 s10 = imageLoad(probe_image, probe_base + ivec2(p1.x, p0.y));
+	vec4 s01 = imageLoad(probe_image, probe_base + ivec2(p0.x, p1.y));
+	vec4 s11 = imageLoad(probe_image, probe_base + p1);
+	float w00 = (1.0 - f.x) * (1.0 - f.y) * s00.a;
+	float w10 = f.x * (1.0 - f.y) * s10.a;
+	float w01 = (1.0 - f.x) * f.y * s01.a;
+	float w11 = f.x * f.y * s11.a;
+	float wsum = w00 + w10 + w01 + w11;
+	vec3 irradiance = wsum > 0.0 ? (s00.rgb * w00 + s10.rgb * w10 + s01.rgb * w01 + s11.rgb * w11) / wsum : vec3(0.0);
+	imageStore(final_image, texel, vec4(direct.rgb + albedo.rgb * irradiance, 1.0));
+#endif
 }

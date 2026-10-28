@@ -59,8 +59,7 @@ public:
 		Transform3D transform;
 		AABB aabb; // Object space.
 		uint64_t last_seen = 0;
-		uint32_t first_card = 0;
-		uint32_t card_count = 0;
+		uint32_t first_card = 0xFFFFFFFF; // Block of 6 card slots, one per axis.
 	};
 
 	struct Stats {
@@ -85,9 +84,10 @@ public:
 	void capture(CaptureFunction p_capture, void *p_userdata);
 	// Direct lighting of cards captured this frame plus a round-robin share of the rest. Light buffers are in the
 	// camera view space given by p_view_to_world; SDF cascades (may be empty) give shadows.
-	void light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult);
+	void light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult, const Vector3 &p_sky_radiance);
 	RID get_direct_texture() const { return direct; }
-	void set_light_debug(bool p_debug) { light_debug = p_debug; }
+	RID get_final_texture() const { return final; }
+	RID get_probe_texture() const { return probes; }
 
 	RID get_albedo_texture() const { return albedo; }
 	RID get_normal_texture() const { return normal; }
@@ -119,6 +119,8 @@ private:
 	RID emission;
 	RID depth;
 	RID direct;
+	RID probes; // atlas_size / 4 radiosity probes.
+	RID final;
 	RID depth_stencil;
 	RID framebuffer;
 
@@ -133,7 +135,7 @@ private:
 	LocalVector<Rect2i> free_rects; // Returned by dropped cards, reused for equal sizes.
 
 	LocalVector<Card> cards;
-	LocalVector<uint32_t> free_cards;
+	LocalVector<uint32_t> free_blocks;
 	HashMap<RenderGeometryInstance *, uint32_t> instance_map;
 	LocalVector<Instance> instances;
 	LocalVector<uint32_t> free_instances;
@@ -145,7 +147,21 @@ private:
 
 	SurfaceCacheLightShaderRD light_shader;
 	RID light_shader_version;
-	RID light_pipeline;
+	enum LightMode {
+		LIGHT_MODE_DIRECT,
+		LIGHT_MODE_PROBES,
+		LIGHT_MODE_RESOLVE,
+		LIGHT_MODE_MAX
+	};
+	RID light_pipelines[LIGHT_MODE_MAX];
+	RID instance_buffer;
+	uint32_t instance_buffer_size = 0;
+	RID grid_buffer;
+	Vector3 grid_origin;
+	bool grid_dirty = true;
+	static const uint32_t GRID = 32;
+	static const uint32_t GRID_SLOTS = 8;
+	float grid_cell = 2.0f;
 	RID card_buffer;
 	uint32_t card_buffer_size = 0;
 	RID light_params_buffer;
@@ -157,12 +173,13 @@ private:
 	LocalVector<uint32_t> captured_this_frame;
 	uint32_t light_round_robin = 0;
 	uint32_t light_share = 8;
-	bool light_debug = false;
+	uint32_t light_debug = 0; // 1: SDF diagnostics in the direct atlas, 2: ray diagnostics in the probe atlas.
 
 	bool _allocate_rect(const Size2i &p_size, Rect2i &r_rect);
 	void _free_rect(const Rect2i &p_rect);
 	void _build_cards(uint32_t p_instance);
 	void _drop_cards(uint32_t p_instance);
+	void _free_block(uint32_t p_instance);
 	Size2i _card_size(const Vector3 &p_extent_world, int p_axis) const;
 	void _card_view(const Instance &p_inst, int p_axis, Transform3D &r_transform, Projection &r_projection) const;
 };
