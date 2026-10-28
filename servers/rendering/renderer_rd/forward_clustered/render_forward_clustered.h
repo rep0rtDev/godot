@@ -36,6 +36,7 @@
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
+#include "servers/rendering/renderer_rd/effects/surface_cache_effect.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
 #include "servers/rendering/renderer_rd/effects/virtual_geometry_effect.h"
 #include "servers/rendering/renderer_rd/effects/virtual_shadows_effect.h"
@@ -798,6 +799,8 @@ private:
 	RendererRD::MotionVectorsStore *motion_vectors_store = nullptr;
 	RendererRD::VirtualGeometryEffect *virtual_geometry = nullptr;
 	RendererRD::VirtualShadowsEffect *virtual_shadows = nullptr;
+	RendererRD::SurfaceCacheEffect *surface_cache = nullptr;
+	static void _surface_cache_capture(void *p_self, const Transform3D &p_transform, const Projection &p_projection, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_rect);
 	HashMap<RID, HashMap<const void *, AABB>> vsm_casters; // Per light: casters in its shadow set last frame, by their bounds then.
 	PagedArrayPool<RenderGeometryInstance *> vsm_instance_pool;
 	PagedArray<RenderGeometryInstance *> vsm_window_instances;

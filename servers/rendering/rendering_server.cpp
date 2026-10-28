@@ -3773,6 +3773,12 @@ void RenderingServer::init() {
 	// 0 off, 1 lit where no page, 2 reference depth, 3 stored depth, 4 level.
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/debug/mode", PROPERTY_HINT_RANGE, "0,4,1"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/smrt_rays", PROPERTY_HINT_RANGE, "0,16,1"), 4);
+	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/enabled", false);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/atlas_size", PROPERTY_HINT_ENUM, "1024,2048,4096"), 4096);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/cards_per_frame", PROPERTY_HINT_RANGE, "1,2000,1"), 300);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/surface_cache/texels_per_meter", PROPERTY_HINT_RANGE, "1,100,1"), 10.0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/max_card_size", PROPERTY_HINT_ENUM, "64,128,256,512"), 512);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/debug/mode", PROPERTY_HINT_RANGE, "0,5,1"), 0);
 	GLOBAL_DEF("rendering/virtual_geometry/software_raster", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/virtual_geometry/software_raster_max_pixels", PROPERTY_HINT_RANGE, "1,256,0.1"), 64.0);
 

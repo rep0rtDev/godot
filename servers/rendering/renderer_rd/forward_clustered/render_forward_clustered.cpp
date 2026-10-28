@@ -32,6 +32,7 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -2407,6 +2408,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			virtual_shadows->mark(rb->get_depth_texture(), *p_render_data->scene_data, rb->get_internal_size());
 		}
 	}
+	if (surface_cache->is_enabled() && !is_reflection_probe && p_render_data->scene_data->view_count == 1) {
+		RENDER_TIMESTAMP("Surface Cache Capture");
+		surface_cache->begin_frame(RSG::rasterizer->get_frame_number(), *p_render_data->instances, p_render_data->scene_data->cam_transform.origin);
+		surface_cache->capture(_surface_cache_capture, this);
+		if (OS::get_singleton()->is_stdout_verbose() && (RSG::rasterizer->get_frame_number() % 30) == 0) {
+			const RendererRD::SurfaceCacheEffect::Stats &st = surface_cache->get_stats();
+			print_line(vformat("surface cache: instances %d cards %d captured %d dirty %d atlas %.1f%%", st.instances, st.cards, st.captured, st.dirty, 100.0 * double(st.atlas_texels) / double(surface_cache->get_atlas_size()) / double(surface_cache->get_atlas_size())));
+		}
+	}
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sscs, using_sdfgi || using_voxelgi, normal_roughness_views, voxel_gi_views);
 
 	if (current_cluster_builder) {
@@ -2808,7 +2818,37 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 }
 
+void RenderForwardClustered::_surface_cache_capture(void *p_self, const Transform3D &p_transform, const Projection &p_projection, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_rect) {
+	RenderForwardClustered *self = static_cast<RenderForwardClustered *>(p_self);
+	self->_render_material(p_transform, p_projection, true, p_instances, p_framebuffer, p_rect, 1.0f);
+}
+
 void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_render_data) {
+	if (surface_cache->is_enabled() && surface_cache->get_debug_mode() != 0 && p_render_data->render_buffers.is_valid()) {
+		// Debug: show one surface cache atlas instead of the frame.
+		RID atlas;
+		switch (surface_cache->get_debug_mode()) {
+			case 1:
+				atlas = surface_cache->get_albedo_texture();
+				break;
+			case 2:
+				atlas = surface_cache->get_normal_texture();
+				break;
+			case 3:
+				atlas = surface_cache->get_orm_texture();
+				break;
+			case 4:
+				atlas = surface_cache->get_emission_texture();
+				break;
+			default:
+				atlas = surface_cache->get_depth_texture();
+				break;
+		}
+		RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+		RID render_target = p_render_data->render_buffers->get_render_target();
+		Size2i rtsize = texture_storage->render_target_get_size(render_target);
+		copy_effects->copy_to_fb_rect(atlas, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false);
+	}
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
@@ -6022,6 +6062,7 @@ RenderForwardClustered::RenderForwardClustered() {
 	ss_effects = memnew(RendererRD::SSEffects);
 	virtual_geometry = memnew(RendererRD::VirtualGeometryEffect);
 	virtual_shadows = memnew(RendererRD::VirtualShadowsEffect);
+	surface_cache = memnew(RendererRD::SurfaceCacheEffect);
 	RendererRD::MeshStorage::set_virtual_geometry_pull_supported(RD::get_singleton()->limit_get(RD::LIMIT_MAX_BOUND_UNIFORM_SETS) > 4);
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
@@ -6035,6 +6076,9 @@ RenderForwardClustered::~RenderForwardClustered() {
 	}
 	if (virtual_shadows) {
 		memdelete(virtual_shadows);
+	}
+	if (surface_cache) {
+		memdelete(surface_cache);
 		virtual_geometry = nullptr;
 	}
 	if (ss_effects != nullptr) {
