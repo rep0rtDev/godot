@@ -422,7 +422,9 @@ void VirtualShadowsEffect::_invalidate(uint32_t p_slot, const LocalVector<AABB> 
 }
 
 void VirtualShadowsEffect::_plan_windows(uint32_t p_slot) {
-	if (!requests_ready) {
+	// The last readback is replayed every frame: a page a moving caster just invalidated was requested a frame ago, so it
+	// re-renders now instead of waiting for the next readback (and being invalidated again before it lands).
+	if (requests.is_empty()) {
 		return;
 	}
 	Slot &slot = slots[p_slot];
