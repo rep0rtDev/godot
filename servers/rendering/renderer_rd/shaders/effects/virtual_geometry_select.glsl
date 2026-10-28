@@ -93,6 +93,29 @@ layout(set = 0, binding = 3, std430) restrict buffer Visibility {
 }
 visibility;
 
+// Streaming: word offset per page in the page pool, NOT_RESIDENT when the page is not loaded.
+#define NOT_RESIDENT 0xFFFFFFFFu
+layout(set = 0, binding = 6, std430) restrict readonly buffer Pages {
+	uint data[];
+}
+pages;
+
+// (first << 8) | count of the finer clusters each cluster was simplified from, NOT_RESIDENT for leaves.
+layout(set = 0, binding = 7, std430) restrict readonly buffer Children {
+	uint data[];
+}
+children;
+
+// Per page: bit 0 drawn this frame, bit 1 wanted but not resident. Read back and cleared by the CPU.
+layout(set = 0, binding = 8, std430) restrict buffer Requests {
+	uint data[];
+}
+requests;
+
+bool page_resident(uint p_page) {
+	return pages.data[p_page] != NOT_RESIDENT;
+}
+
 #ifdef MODE_OCCLUSION
 layout(set = 1, binding = 0) uniform sampler2D hzb;
 #endif
@@ -324,7 +347,26 @@ void main() {
 
 	float scale = instance_scale();
 
-	bool selected = error_is_imperceptible(c.self_sphere, c.self_error, scale) && !error_is_imperceptible(c.parent_sphere, c.parent_error, scale);
+	// A cluster draws when its parent is too coarse and it is fine enough itself, or when the finer clusters it
+	// stands in for are not streamed in yet; those pages get requested. Clusters of unloaded pages never draw.
+	bool self_fine = error_is_imperceptible(c.self_sphere, c.self_error, scale);
+	bool parent_fine = error_is_imperceptible(c.parent_sphere, c.parent_error, scale);
+	bool children_ok = true;
+	uint child_range = children.data[index];
+	if (!parent_fine && !self_fine && child_range != NOT_RESIDENT) {
+		for (uint k = 0u; k < (child_range & 0xFFu); k++) {
+			uint child_page = clusters.data[(child_range >> 8u) + k].page_and_triangles >> 8u;
+			if (!page_resident(child_page)) {
+				children_ok = false;
+				atomicOr(requests.data[child_page], 2u);
+			}
+		}
+	}
+	uint page = c.page_and_triangles >> 8u;
+	bool selected = page_resident(page) && !parent_fine && (self_fine || !children_ok);
+	if (selected) {
+		atomicOr(requests.data[page], 1u);
+	}
 	bool visible = selected && in_frustum(to_view(c.cull_sphere.xyz), c.cull_sphere.w * scale);
 
 #ifdef MODE_OCCLUSION

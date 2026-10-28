@@ -4579,6 +4579,18 @@ void RenderForwardClustered::_virtual_geometry_select(const RenderDataRD *p_rend
 	if (virtual_geometry_surfaces.is_empty()) {
 		return;
 	}
+	{
+		// Page streaming: apply last frame's requests, read back this frame's. Several instances may share a surface.
+		RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+		const uint64_t frame = Engine::get_singleton()->get_frames_drawn() + 1;
+		HashSet<void *> streamed;
+		for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
+			if (!streamed.has(surf->surface)) {
+				streamed.insert(surf->surface);
+				mesh_storage->mesh_surface_vg_stream(surf->surface, frame);
+			}
+		}
+	}
 
 	if (compact) {
 		for (GeometryInstanceSurfaceDataCache *surf : virtual_geometry_surfaces) {
@@ -4867,10 +4879,10 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		const RID vg_node_buffer = mesh_storage->mesh_surface_get_vg_node_buffer(sdcache->surface);
 		sdcache->vg_work_buffer = virtual_geometry->create_work_buffer(vg_node_count, vg_cluster_count);
 		const RID vg_cluster_buffer = mesh_storage->mesh_surface_get_vg_cluster_buffer(sdcache->surface);
-		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer);
+		sdcache->vg_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, mesh_storage->mesh_surface_get_vg_page_table_buffer(sdcache->surface), mesh_storage->mesh_surface_get_vg_children_buffer(sdcache->surface), mesh_storage->mesh_surface_get_vg_request_buffer(sdcache->surface));
 		if (virtual_geometry->uses_indirect_count() && vg_node_count > 0) {
-			sdcache->vg_traverse_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_TRAVERSE);
-			sdcache->vg_instance_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_INSTANCE_OCCLUSION);
+			sdcache->vg_traverse_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, mesh_storage->mesh_surface_get_vg_page_table_buffer(sdcache->surface), mesh_storage->mesh_surface_get_vg_children_buffer(sdcache->surface), mesh_storage->mesh_surface_get_vg_request_buffer(sdcache->surface), RendererRD::VirtualGeometryEffect::MODE_TRAVERSE);
+			sdcache->vg_instance_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, mesh_storage->mesh_surface_get_vg_page_table_buffer(sdcache->surface), mesh_storage->mesh_surface_get_vg_children_buffer(sdcache->surface), mesh_storage->mesh_surface_get_vg_request_buffer(sdcache->surface), RendererRD::VirtualGeometryEffect::MODE_INSTANCE_OCCLUSION);
 			sdcache->vg_node_count = vg_node_count;
 			const RID vg_page_buffer = mesh_storage->mesh_surface_get_vg_page_buffer(sdcache->surface);
 			const RID vg_page_table_buffer = mesh_storage->mesh_surface_get_vg_page_table_buffer(sdcache->surface);

@@ -232,7 +232,7 @@ public:
 	RID create_command_buffer(const Vector<uint8_t> &p_cluster_data, uint32_t p_leaf_index_count) const;
 	// Traversal queue and candidate list for one instance of a surface with p_node_count hierarchy nodes.
 	RID create_work_buffer(uint32_t p_node_count, uint32_t p_cluster_count) const;
-	RID create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer, RID p_node_buffer, RID p_work_buffer, ShaderMode p_mode = MODE_SELECT) const;
+	RID create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer, RID p_node_buffer, RID p_work_buffer, RID p_page_table_buffer, RID p_children_buffer, RID p_request_buffer, ShaderMode p_mode = MODE_SELECT) const;
 };
 
 } // namespace RendererRD

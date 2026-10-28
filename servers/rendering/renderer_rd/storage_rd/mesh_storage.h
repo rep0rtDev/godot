@@ -38,6 +38,7 @@
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/mesh_storage.h"
 #include "servers/rendering/storage/utilities.h"
+#include "servers/rendering/virtual_geometry.h"
 
 namespace RendererRD {
 
@@ -130,8 +131,22 @@ private:
 			RID vg_cluster_buffer;
 			RID vg_node_buffer;
 			uint32_t vg_node_count = 0;
-			RID vg_page_buffer; // Every cluster page, see VirtualGeometry::pack().
+			RID vg_page_buffer; // Page pool: every page, or vg_pool_slots slots of PAGE_SIZE when streaming.
 			RID vg_page_table_buffer; // Word offset per page, see virtual_geometry_geometry_inc.glsl.
+			RID vg_children_buffer;
+			RID vg_request_buffer; // Per page: 1 drawn, 2 wanted; written by the select shader.
+			// Streaming state, see mesh_surface_vg_stream().
+			bool vg_streaming = false;
+			uint32_t vg_stream_id = 0;
+			uint32_t vg_pool_slots = 0;
+			VirtualGeometryHeader vg_header = {};
+			Vector<uint32_t> vg_page_table;
+			Vector<int32_t> vg_page_slot; // -1 when not resident.
+			Vector<uint32_t> vg_slot_page;
+			Vector<uint64_t> vg_page_last_used;
+			Vector<uint32_t> vg_page_dependents; // Resident pages that depend on this page.
+			Vector<uint32_t> vg_requests; // Last readback.
+			bool vg_requests_pending = false;
 			uint32_t vg_cluster_count = 0;
 			uint32_t vg_leaf_index_count = 0;
 			Vector<uint8_t> vg_cluster_data;
@@ -537,6 +552,29 @@ public:
 		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_page_table_buffer;
 	}
 
+	_FORCE_INLINE_ RID mesh_surface_get_vg_children_buffer(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_children_buffer;
+	}
+
+	_FORCE_INLINE_ RID mesh_surface_get_vg_request_buffer(void *p_surface) const {
+		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_request_buffer;
+	}
+
+	// Applies the page requests of the last frame (installs wanted pages, evicts stale ones) and starts reading
+	// back this frame's. Call once per frame per surface, outside of draw and compute lists.
+	void mesh_surface_vg_stream(void *p_surface, uint64_t p_frame);
+	uint32_t mesh_surface_get_vg_resident_pages(void *p_surface) const;
+
+private:
+	static HashMap<uint32_t, Mesh::Surface *> vg_streaming_surfaces;
+	static uint32_t vg_stream_id_counter;
+	static const VirtualGeometryPage *_vg_pages(const Mesh::Surface *p_surface);
+	static const uint32_t *_vg_dependencies(const Mesh::Surface *p_surface);
+	static bool _vg_install_page(Mesh::Surface *p_surface, uint32_t p_page, uint64_t p_frame);
+	static void _vg_evict_page(Mesh::Surface *p_surface, uint32_t p_page);
+	static void _vg_requests_received(const Vector<uint8_t> &p_data, uint32_t p_stream_id);
+
+public:
 	_FORCE_INLINE_ uint32_t mesh_surface_get_vg_leaf_index_count(void *p_surface) const {
 		return reinterpret_cast<Mesh::Surface *>(p_surface)->vg_leaf_index_count;
 	}

@@ -248,7 +248,7 @@ RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluste
 	return RD::get_singleton()->storage_buffer_create(data.size(), data, RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 }
 
-RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer, RID p_node_buffer, RID p_work_buffer, ShaderMode p_mode) const {
+RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_command_buffer, RID p_visibility_buffer, RID p_node_buffer, RID p_work_buffer, RID p_page_table_buffer, RID p_children_buffer, RID p_request_buffer, ShaderMode p_mode) const {
 	Vector<RD::Uniform> uniforms;
 	{
 		RD::Uniform u;
@@ -291,6 +291,10 @@ RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_comman
 		u.binding = 5;
 		u.append_id(p_work_buffer);
 		uniforms.push_back(u);
+	}
+	const RID streaming[3] = { p_page_table_buffer, p_children_buffer, p_request_buffer };
+	for (uint32_t i = 0; i < 3; i++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, streaming[i]));
 	}
 	return RD::get_singleton()->uniform_set_create(uniforms, get_shader(p_mode), 0);
 }
