@@ -89,12 +89,16 @@ public:
 		uint32_t slot;
 		uint32_t entry_capacity;
 		uint32_t pad[2];
+		float aabb_position[4];
+		float aabb_size[4];
 	};
-	static_assert(sizeof(RasterPushConstant) == 96);
+	static_assert(sizeof(RasterPushConstant) == 128);
 	static constexpr uint32_t RASTER_FLAG_INDEX_16 = 1;
 	// Drop triangles by the sign of their pixel space area, from the material cull mode.
 	static constexpr uint32_t RASTER_FLAG_CULL_POSITIVE = 2;
 	static constexpr uint32_t RASTER_FLAG_CULL_NEGATIVE = 4;
+	// Positions are unorm16 in the surface AABB (ARRAY_FLAG_COMPRESS_ATTRIBUTES).
+	static constexpr uint32_t RASTER_FLAG_COMPRESSED = 8;
 	// Rasterized clusters per frame; each visibility buffer id holds the entry in 25 bits.
 	static constexpr uint32_t ENTRY_CAPACITY = 1 << 20;
 	// Material pass tiles, see virtual_geometry_tiles.glsl.
@@ -231,6 +235,7 @@ public:
 	static constexpr uint32_t MATERIAL_FLAG_COLOR = 4;
 	static constexpr uint32_t MATERIAL_FLAG_UV = 8;
 	static constexpr uint32_t MATERIAL_FLAG_UV2 = 16;
+	static constexpr uint32_t MATERIAL_FLAG_COMPRESSED = 32;
 	static constexpr float SOFTWARE_DEPTH_BIAS = 1.0f / 65536.0f;
 	RID create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_vertex_buffer, RID p_index_buffer) const;
 	// Writes the depth of every rasterized pixel into p_framebuffer's depth attachment.

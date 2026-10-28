@@ -35,7 +35,7 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer Work {
 work;
 
 layout(set = 0, binding = 2, std430) restrict readonly buffer Positions {
-	float data[];
+	uint data[]; // float3 per vertex, or unorm16 x4 (xyz in the surface AABB, w tangent angle) when FLAG_COMPRESSED.
 }
 positions;
 
@@ -59,6 +59,7 @@ entries;
 #define FLAG_INDEX_16 1u
 #define FLAG_CULL_POSITIVE 2u
 #define FLAG_CULL_NEGATIVE 4u
+#define FLAG_COMPRESSED 8u
 
 layout(push_constant, std430) uniform Params {
 	mat4 model_view_projection;
@@ -69,6 +70,8 @@ layout(push_constant, std430) uniform Params {
 	uint entry_capacity;
 	uint pad0;
 	uint pad1;
+	vec4 aabb_position; // Dequantization of FLAG_COMPRESSED positions.
+	vec4 aabb_size;
 }
 params;
 
@@ -84,8 +87,16 @@ uint fetch_index(uint p_index) {
 	return indices.data[p_index];
 }
 
+vec3 position(uint p_vertex) {
+	if ((params.flags & FLAG_COMPRESSED) != 0u) {
+		vec3 unorm = vec3(unpackUnorm2x16(positions.data[p_vertex * 2u]), unpackUnorm2x16(positions.data[p_vertex * 2u + 1u]).x);
+		return unorm * params.aabb_size.xyz + params.aabb_position.xyz;
+	}
+	return vec3(uintBitsToFloat(positions.data[p_vertex * 3u]), uintBitsToFloat(positions.data[p_vertex * 3u + 1u]), uintBitsToFloat(positions.data[p_vertex * 3u + 2u]));
+}
+
 vec3 project(uint p_vertex) {
-	vec4 clip = params.model_view_projection * vec4(positions.data[p_vertex * 3u], positions.data[p_vertex * 3u + 1u], positions.data[p_vertex * 3u + 2u], 1.0);
+	vec4 clip = params.model_view_projection * vec4(position(p_vertex), 1.0);
 	vec3 ndc = clip.xyz / clip.w;
 	return vec3((ndc.xy * 0.5 + 0.5) * vec2(params.size), ndc.z);
 }

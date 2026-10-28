@@ -4651,6 +4651,13 @@ void RenderForwardClustered::_virtual_geometry_raster(const RenderDataRD *p_rend
 		// Work buffer: header, traversal queue, candidates, early list, late list.
 		push_constant.list_offset = RendererRD::VirtualGeometryEffect::WORK_HEADER_SIZE / sizeof(uint32_t) + surf->vg_node_count + (p_late ? 2 : 1) * surf->vg_cluster_count;
 		push_constant.flags = surf->vg_raster_flags;
+		if (surf->vg_raster_flags & RendererRD::VirtualGeometryEffect::RASTER_FLAG_COMPRESSED) {
+			const AABB aabb = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_aabb(surf->surface);
+			for (int a = 0; a < 3; a++) {
+				push_constant.aabb_position[a] = aabb.position[a];
+				push_constant.aabb_size[a] = aabb.size[a];
+			}
+		}
 		if (surf->shader) {
 			const RD::PolygonCullMode cull_mode = surf->shader->get_cull_mode_from_cull_variant(surf->owner->mirror ? SceneShaderForwardClustered::ShaderData::CULL_VARIANT_REVERSED : SceneShaderForwardClustered::ShaderData::CULL_VARIANT_NORMAL);
 			if (cull_mode == RD::POLYGON_CULL_BACK) {
@@ -4673,8 +4680,8 @@ void RenderForwardClustered::_virtual_geometry_material_update(GeometryInstanceS
 	RD *rd = RD::get_singleton();
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	const uint64_t format = mesh_storage->mesh_surface_get_format(p_surface->surface);
-	// Uncompressed, unskinned surfaces only; everything else keeps the hardware redraw of its software clusters.
-	if (p_shader.is_null() || (format & (RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES | RSE::ARRAY_FLAG_USE_2D_VERTICES | RSE::ARRAY_FORMAT_BONES)) || !(format & RSE::ARRAY_FORMAT_NORMAL)) {
+	// Unskinned 3D surfaces only; everything else keeps the hardware redraw of its software clusters.
+	if (p_shader.is_null() || (format & (RSE::ARRAY_FLAG_USE_2D_VERTICES | RSE::ARRAY_FORMAT_BONES)) || !(format & RSE::ARRAY_FORMAT_NORMAL)) {
 		return;
 	}
 	const RID visibility = virtual_geometry->get_visibility_buffer();
@@ -4699,7 +4706,8 @@ void RenderForwardClustered::_virtual_geometry_material_update(GeometryInstanceS
 				((format & RSE::ARRAY_FORMAT_TANGENT) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_TANGENT : 0) |
 				((format & RSE::ARRAY_FORMAT_COLOR) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_COLOR : 0) |
 				((format & RSE::ARRAY_FORMAT_TEX_UV) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_UV : 0) |
-				((format & RSE::ARRAY_FORMAT_TEX_UV2) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_UV2 : 0);
+				((format & RSE::ARRAY_FORMAT_TEX_UV2) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_UV2 : 0) |
+				((format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_COMPRESSED : 0);
 		params.vertex_count = vertex_count;
 		params.normal_stride = normal_element_size;
 		params.attrib_stride = attrib_element_size;
@@ -4888,9 +4896,10 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 			sdcache->vg_instance_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_INSTANCE_OCCLUSION);
 			sdcache->vg_node_count = vg_node_count;
 			const uint64_t vg_format = mesh_storage->mesh_surface_get_format(sdcache->surface);
-			if (virtual_geometry->uses_software_raster() && !(vg_format & (RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES | RSE::ARRAY_FLAG_USE_2D_VERTICES))) {
+			if (virtual_geometry->uses_software_raster() && !(vg_format & RSE::ARRAY_FLAG_USE_2D_VERTICES)) {
 				sdcache->vg_raster_uniform_set = virtual_geometry->create_raster_uniform_set(vg_cluster_buffer, sdcache->vg_work_buffer, mesh_storage->mesh_surface_get_vertex_buffer(sdcache->surface), mesh_storage->mesh_surface_get_index_buffer(sdcache->surface));
-				sdcache->vg_raster_flags = mesh_storage->mesh_surface_has_16_bit_indices(sdcache->surface) ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_INDEX_16 : 0;
+				sdcache->vg_raster_flags = (mesh_storage->mesh_surface_has_16_bit_indices(sdcache->surface) ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_INDEX_16 : 0) |
+						((vg_format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_COMPRESSED : 0);
 			}
 		}
 		sdcache->vg_cluster_count = vg_cluster_count;

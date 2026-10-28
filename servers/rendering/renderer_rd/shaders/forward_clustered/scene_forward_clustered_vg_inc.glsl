@@ -49,6 +49,7 @@ vg_attributes;
 #define VG_FLAG_COLOR 4u
 #define VG_FLAG_UV 8u
 #define VG_FLAG_UV2 16u
+#define VG_FLAG_COMPRESSED 32u // ARRAY_FLAG_COMPRESS_ATTRIBUTES: unorm16 positions in the instance AABB, axis-angle tangents, unorm16 UVs.
 
 layout(set = 4, binding = 6, std140) uniform VGSurface {
 	uvec2 size;
@@ -73,13 +74,34 @@ uint vg_fetch_index(uint p_index) {
 	return vg_indices.data[p_index];
 }
 
-vec3 vg_position(uint p_vertex) {
+// Fragment-stage copy of the vertex shader's axis_angle_to_tbn.
+void vg_axis_angle_to_tbn(vec3 axis, float angle, out vec3 tangent, out vec3 binormal, out vec3 normal) {
+	float c = cos(angle);
+	float s = sin(angle);
+	vec3 omc_axis = (1.0 - c) * axis;
+	vec3 s_axis = s * axis;
+	tangent = omc_axis.xxx * axis + vec3(c, -s_axis.z, s_axis.y);
+	binormal = omc_axis.yyy * axis + vec3(s_axis.z, c, -s_axis.x);
+	normal = omc_axis.zzz * axis + vec3(-s_axis.y, s_axis.x, c);
+}
+
+// r_angle: the compressed tangent angle (unorm), unused for uncompressed surfaces.
+vec3 vg_position(uint p_vertex, vec3 p_aabb_position, vec3 p_aabb_size, out float r_angle) {
+	if ((vg_surface.flags & VG_FLAG_COMPRESSED) != 0u) {
+		vec2 zw = unpackUnorm2x16(vg_vertices.data[p_vertex * 2u + 1u]);
+		r_angle = zw.y;
+		return vec3(unpackUnorm2x16(vg_vertices.data[p_vertex * 2u]), zw.x) * p_aabb_size + p_aabb_position;
+	}
+	r_angle = 0.0;
 	uint base = p_vertex * 3u;
 	return vec3(uintBitsToFloat(vg_vertices.data[base]), uintBitsToFloat(vg_vertices.data[base + 1u]), uintBitsToFloat(vg_vertices.data[base + 2u]));
 }
 
 vec2 vg_attribute_vec2(uint p_vertex, uint p_offset) {
 	uint word = (p_vertex * vg_surface.attrib_stride + p_offset) >> 2u;
+	if ((vg_surface.flags & VG_FLAG_COMPRESSED) != 0u) {
+		return unpackUnorm2x16(vg_attributes.data[word]);
+	}
 	return vec2(uintBitsToFloat(vg_attributes.data[word]), uintBitsToFloat(vg_attributes.data[word + 1u]));
 }
 
@@ -169,8 +191,9 @@ void vg_material_eval(in SceneData scene_data, uvec2 p_triangle) {
 	vec3 view_pos[3];
 	vec2 screen[3];
 	vec3 inv_w;
+	float angles[3];
 	for (int i = 0; i < 3; i++) {
-		view_pos[i] = (modelview * vec4(vg_position(ids[i]), 1.0)).xyz;
+		view_pos[i] = (modelview * vec4(vg_position(ids[i], instances.data[instance_index].compressed_aabb_position_pad.xyz, instances.data[instance_index].compressed_aabb_size_pad.xyz, angles[i]), 1.0)).xyz;
 		vec4 clip = projection_matrix * vec4(view_pos[i], 1.0);
 		inv_w[i] = 1.0 / clip.w;
 		screen[i] = clip.xy * inv_w[i];
@@ -195,7 +218,14 @@ void vg_material_eval(in SceneData scene_data, uvec2 p_triangle) {
 		vec3 n = oct_to_vec3(unpackUnorm2x16(vg_vertices.data[word]) * 2.0 - 1.0);
 		vec3 t;
 		vec3 bn;
-		if ((vg_surface.flags & VG_FLAG_TANGENT) != 0u) {
+		if ((vg_surface.flags & VG_FLAG_COMPRESSED) != 0u) {
+			// Same encoding _unpack_vertex_attributes reads: the tangent frame is a rotation of the normal by an angle.
+			float angle = angles[i];
+			float binormal_sign = angle > 0.5 ? 1.0 : -1.0;
+			angle = abs(angle * 2.0 - 1.0) * M_PI;
+			vg_axis_angle_to_tbn(n, angle, t, bn, n);
+			bn *= binormal_sign;
+		} else if ((vg_surface.flags & VG_FLAG_TANGENT) != 0u) {
 			vec2 signed_tangent = unpackUnorm2x16(vg_vertices.data[word + 1u]) * 2.0 - 1.0;
 			t = oct_to_vec3(vec2(signed_tangent.x, abs(signed_tangent.y) * 2.0 - 1.0));
 			bn = normalize(cross(n, t) * sign(signed_tangent.y));

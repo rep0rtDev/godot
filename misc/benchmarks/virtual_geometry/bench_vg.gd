@@ -1,6 +1,6 @@
 extends SceneTree
 # Benchmark: N instances of a dense mesh, regular vs virtual geometry.
-# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1 [--wall_off=<frame>]] [--mat=tex]
+# Usage: godot --rendering-driver vulkan -s bench_vg.gd -- --vg=1 --count=400 --frames=300 [--wall=1 [--wall_off=<frame>]] [--mat=tex] [--compress=1]
 # --wall_off hides the occluder at the given frame, so the final frame checks that newly revealed geometry appears.
 # Prints average CPU frame time and GPU render time reported by the RenderingServer.
 
@@ -49,7 +49,10 @@ func _init() -> void:
 	sm.rings = int(arg("rings", "256"))
 	sm.radial_segments = sm.rings * 2
 	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sm.get_mesh_arrays(), [], {}, Mesh.ARRAY_FLAG_USE_VIRTUAL_GEOMETRY if use_vg else 0)
+	var flags := Mesh.ARRAY_FLAG_USE_VIRTUAL_GEOMETRY if use_vg else 0
+	if arg("compress", "0") == "1":
+		flags |= Mesh.ARRAY_FLAG_COMPRESS_ATTRIBUTES
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, sm.get_mesh_arrays(), [], {}, flags)
 	if arg("mat", "") == "tex":
 		# Checker albedo plus a bump normal map, to compare UV, normal and tangent reconstruction.
 		mesh.surface_set_material(0, textured_material())
