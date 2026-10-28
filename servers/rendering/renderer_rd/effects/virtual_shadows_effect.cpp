@@ -272,13 +272,20 @@ int32_t VirtualShadowsEffect::_alloc_page() {
 		free_list.remove_at(free_list.size() - 1);
 		return p;
 	}
+	// Under pressure evict the page that was idle longest; among equally idle pages the finest one goes first, so the
+	// coarse pages that every pixel can fall back to survive.
 	int32_t victim = -1;
+	uint64_t victim_score = 0;
 	for (uint32_t i = 0; i < pool_pages; i++) {
 		if (phys_last_used[i] >= frame) {
 			continue; // Wanted this frame.
 		}
-		if (victim < 0 || phys_last_used[i] < phys_last_used[victim]) {
+		const uint32_t level = phys_entry[i] / ENTRIES_PER_LEVEL;
+		const uint32_t fineness = level < LEVELS ? LEVELS - level : SPOT_MIPS - (level - LEVELS) % SPOT_MIPS;
+		const uint64_t score = (frame - phys_last_used[i]) * 64 + fineness;
+		if (victim < 0 || score > victim_score) {
 			victim = i;
+			victim_score = score;
 		}
 	}
 	if (victim < 0) {
@@ -479,6 +486,11 @@ void VirtualShadowsEffect::_plan_windows(uint32_t p_slot) {
 		window_index[order[i].second] = index;
 		windows.push_back(win);
 	}
+	// Coarse pages first: when the pool runs out, every pixel still finds a coarser page to fall back to.
+	struct NeedSort {
+		bool operator()(const Need &a, const Need &b) const { return a.level > b.level; }
+	};
+	needs.sort_custom<NeedSort>();
 	for (const Need &n : needs) {
 		const uint32_t *index = window_index.getptr(window_key(n));
 		if (!index) {
@@ -486,7 +498,8 @@ void VirtualShadowsEffect::_plan_windows(uint32_t p_slot) {
 		}
 		const int32_t phys = _alloc_page();
 		if (phys < 0) {
-			break;
+			stats.dropped++;
+			continue;
 		}
 		_free_entry(n.entry);
 		entry_valid.write[n.entry] = 1;

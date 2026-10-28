@@ -146,6 +146,7 @@ private:
 		uint32_t missing = 0;
 		uint32_t rendered = 0;
 		uint32_t windows_needed = 0;
+		uint32_t dropped = 0; // Requested pages that found no free physical page this frame.
 	} stats;
 
 	static void _requests_received(const Vector<uint8_t> &p_data);
