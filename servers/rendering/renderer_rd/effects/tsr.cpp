@@ -30,6 +30,7 @@
 
 #include "tsr.h"
 
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server_globals.h"
 
@@ -87,6 +88,7 @@ void TSREffect::process(Ref<RenderSceneBuffersRD> p_render_buffers, const Parame
 	pc.jitter[1] = p_params.jitter.y;
 	pc.reset = reset ? 1.0f : 0.0f;
 	pc.sharpness = p_params.sharpness;
+	RendererRD::MaterialStorage::store_camera(p_params.reprojection, pc.reprojection);
 
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, pipeline);

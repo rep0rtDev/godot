@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/math/projection.h"
 #include "servers/rendering/renderer_rd/shaders/effects/tsr.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 
@@ -48,6 +49,7 @@ public:
 		Size2i target_size;
 		Vector2 jitter; // Internal pixels.
 		float sharpness = 0.0f;
+		Projection reprojection; // Clip space of this frame to clip space of the previous one, for static geometry.
 	};
 
 	TSREffect();
@@ -62,6 +64,7 @@ private:
 		float jitter[2];
 		float reset;
 		float sharpness;
+		float reprojection[16];
 	};
 
 	TsrShaderRD shader;

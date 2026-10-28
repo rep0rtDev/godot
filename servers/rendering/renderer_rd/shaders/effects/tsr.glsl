@@ -23,8 +23,11 @@ layout(push_constant, std430) uniform Params {
 	vec2 jitter; // Current jitter in internal pixels.
 	float reset; // 1 drops the history.
 	float sharpness;
+	mat4 reprojection;
 }
 params;
+
+#include "motion_vector_inc.glsl"
 
 vec3 rgb_to_ycocg(vec3 c) {
 	return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
@@ -89,7 +92,21 @@ void main() {
 	ivec2 src_pixel = clamp(ivec2(uv * params.internal_size), ivec2(0), ivec2(params.internal_size) - 1);
 
 	// Current colour and neighbourhood bounds (3x3 at internal resolution, YCoCg, tonemapped).
-	vec3 current = reinhard(textureLod(color_buffer, uv_src, 0.0).rgb);
+	// Reconstruct the current colour from the jittered input samples: each input texel p saw the scene at
+	// (p + 0.5 - jitter) input pixels, weight it by its distance to this output pixel.
+	vec2 pos_in = uv * params.internal_size;
+	vec3 current = vec3(0.0);
+	float current_w = 0.0;
+	for (int y = -1; y <= 1; y++) {
+		for (int x = -1; x <= 1; x++) {
+			ivec2 p = clamp(src_pixel + ivec2(x, y), ivec2(0), ivec2(params.internal_size) - 1);
+			vec2 d = pos_in - (vec2(p) + 0.5 - params.jitter);
+			float w = exp(-8.0 * dot(d, d));
+			current += reinhard(texelFetch(color_buffer, p, 0).rgb) * w;
+			current_w += w;
+		}
+	}
+	current /= max(current_w, 1e-4);
 	vec3 m1 = vec3(0.0);
 	vec3 m2 = vec3(0.0);
 	vec3 n_min = vec3(1e9);
@@ -115,6 +132,10 @@ void main() {
 	vec3 sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
 	// Dilated velocity: the nearest pixel of the 3x3 carries the motion, so edges of moving objects keep their history.
 	vec2 velocity = imageLoad(velocity_buffer, nearest).xy;
+	if (velocity.x <= -1.0) {
+		// Static geometry writes no motion vectors (the buffer is cleared to -1): derive them from depth as the FSR2 path does.
+		velocity = derive_motion_vector((vec2(nearest) + 0.5) / params.internal_size, nearest_depth, params.reprojection);
+	}
 	vec2 uv_prev = uv + velocity;
 	float speed_px = length(velocity * params.target_size);
 
@@ -133,9 +154,11 @@ void main() {
 	vec3 hist = ycocg_to_rgb(hist_ycocg);
 	float max_frames = speed_px > 1.0 ? 4.0 : 16.0;
 	frames = min(frames, max_frames);
-	float alpha = 1.0 / (frames + 1.0);
+	// A jittered sample far from this output pixel carries little information: weight it by the kernel sum.
+	float conf = clamp(current_w, 0.05, 1.0);
+	float alpha = conf / (frames + conf);
 	vec3 result = mix(hist, current, alpha);
-	frames = min(frames + 1.0, 16.0);
+	frames = min(frames + conf, 16.0);
 	vec3 out_rgb = reinhard_inverse(result);
 	imageStore(history_out, pixel, vec4(out_rgb, frames / 16.0));
 	imageStore(output_buffer, pixel, vec4(out_rgb, 1.0));
