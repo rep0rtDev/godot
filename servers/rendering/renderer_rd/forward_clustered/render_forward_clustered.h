@@ -582,6 +582,7 @@ private:
 		RID vg_material_uniform_set;
 		RID vg_material_params;
 		RID vg_material_visibility;
+		RID vg_material_tiles;
 		uint32_t vg_material_slot = UINT32_MAX;
 		Size2i vg_material_size;
 		uint32_t vg_node_count = 0;

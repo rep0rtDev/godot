@@ -35,6 +35,7 @@
 #include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_raster.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_resolve.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_select.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/effects/virtual_geometry_tiles.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/rendering_device.h"
 
@@ -96,6 +97,9 @@ public:
 	static constexpr uint32_t RASTER_FLAG_CULL_NEGATIVE = 4;
 	// Rasterized clusters per frame; each visibility buffer id holds the entry in 25 bits.
 	static constexpr uint32_t ENTRY_CAPACITY = 1 << 20;
+	// Material pass tiles, see virtual_geometry_tiles.glsl.
+	static constexpr uint32_t TILE_SIZE = 8;
+	static constexpr uint32_t TILE_COMMAND_STRIDE = sizeof(uint32_t) * 4;
 
 	// GPU counters: camera clusters, camera triangles, shadow clusters, shadow triangles.
 	enum Stat {
@@ -147,6 +151,27 @@ private:
 	RID entry_buffer;
 	RID raster_frame_uniform_set;
 	RID resolve_uniform_set;
+
+	struct TilesPushConstant {
+		uint32_t size[2];
+		uint32_t slot_count;
+		uint32_t pad;
+	};
+	enum TilesMode {
+		TILES_COUNT,
+		TILES_PREFIX,
+		TILES_FILL,
+		TILES_MAX,
+	};
+	VirtualGeometryTilesShaderRD tiles_shader;
+	RID tiles_shader_version;
+	RID tiles_pipelines[TILES_MAX];
+	RID tile_buffer;
+	RID tile_command_buffer;
+	uint32_t tile_command_capacity = 0;
+	uint32_t tile_buffer_words = 0;
+	uint32_t tile_slot_count = 0;
+	RID tiles_uniform_set;
 	static SafeNumeric<uint64_t> stats[STAT_MAX];
 	static void _stats_received(const Vector<uint8_t> &p_data);
 
@@ -172,7 +197,14 @@ public:
 	float get_software_raster_max_pixels() const { return software_raster_max_pixels; }
 
 	// Allocates and clears the 64-bit visibility buffer and the entry table for this frame.
-	void begin_software_raster(const Size2i &p_size);
+	// p_slot_count is the number of surfaces rasterized this frame, which also sizes the material tile lists.
+	void begin_software_raster(const Size2i &p_size, uint32_t p_slot_count);
+	// Once the visibility buffer is final: builds the per-surface tile lists and indirect draws of the material pass.
+	void classify_software_tiles();
+	// Storage buffer of fill cursors and tile lists, read by the material pass vertex stage.
+	RID get_tile_buffer() const { return tile_buffer; }
+	// One non-indexed indirect draw command per surface slot, TILE_COMMAND_STRIDE apart.
+	RID get_tile_command_buffer() const { return tile_command_buffer; }
 	RID get_raster_pipeline() const { return raster_pipeline; }
 	// Set 1 of the raster shader: visibility buffer and entry table.
 	RID get_raster_frame_uniform_set() const { return raster_frame_uniform_set; }

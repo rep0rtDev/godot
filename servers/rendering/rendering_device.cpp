@@ -6285,6 +6285,12 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 	_draw_list_draw_indirect(p_list, p_use_indices, p_buffer, p_offset, p_draw_count, p_stride, RID(), 0);
 }
 
+void RenderingDevice::draw_list_draw_indirect_count(DrawListID p_list, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_DRAW_INDIRECT_COUNT), "Indirect count draws are not supported by this device.");
+	ERR_FAIL_COND(p_count_buffer.is_null());
+	_draw_list_draw_indirect(p_list, false, p_buffer, p_offset, p_max_draw_count, p_stride, p_count_buffer, p_count_offset);
+}
+
 void RenderingDevice::draw_list_draw_indexed_indirect_count(DrawListID p_list, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
 	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_DRAW_INDIRECT_COUNT), "Indirect count draws are not supported by this device.");
 	ERR_FAIL_COND(p_count_buffer.is_null());
@@ -6400,7 +6406,11 @@ void RenderingDevice::_draw_list_draw_indirect(DrawListID p_list, bool p_use_ind
 	} else {
 		ERR_FAIL_COND_MSG(p_offset + 16 > buffer->size, "Offset provided (+16) is past the end of buffer.");
 
-		draw_graph.add_draw_list_draw_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+		if (count_buffer) {
+			draw_graph.add_draw_list_draw_indirect_count(buffer->driver_id, p_offset, count_buffer->driver_id, p_count_offset, p_draw_count, p_stride);
+		} else {
+			draw_graph.add_draw_list_draw_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+		}
 	}
 
 	draw_list.state.draw_count++;

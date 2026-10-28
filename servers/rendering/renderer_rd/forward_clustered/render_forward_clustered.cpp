@@ -673,7 +673,17 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 							RD::get_singleton()->draw_list_set_push_constant(draw_list, &push_constant, software_push_constant_size);
 							if (material_pass) {
 								RD::get_singleton()->draw_list_bind_uniform_set(draw_list, surf->vg_material_uniform_set, 4);
-								RD::get_singleton()->draw_list_draw(draw_list, false, 1, 3);
+								// One instance per 8x8 tile holding pixels of this surface, from classify_software_tiles().
+								const RID tile_commands = virtual_geometry->get_tile_command_buffer();
+								const uint32_t command_offset = surf->vg_material_slot * RendererRD::VirtualGeometryEffect::TILE_COMMAND_STRIDE;
+								if (virtual_geometry->uses_indirect_count()) {
+									// The instance count doubles as the draw count (clamped to one), which skips surfaces without tiles.
+									// It also keeps drivers that leak the count buffer of a previous count draw into plain indirect draws
+									// (seen on lavapipe 23.2) from drawing nothing.
+									RD::get_singleton()->draw_list_draw_indirect_count(draw_list, tile_commands, command_offset, tile_commands, command_offset + sizeof(uint32_t), 1, RendererRD::VirtualGeometryEffect::TILE_COMMAND_STRIDE);
+								} else {
+									RD::get_singleton()->draw_list_draw_indirect(draw_list, false, tile_commands, command_offset, 1, RendererRD::VirtualGeometryEffect::TILE_COMMAND_STRIDE);
+								}
 								virtual_geometry_material_draws++;
 							} else {
 								for (uint32_t range = 3; range < RendererRD::VirtualGeometryEffect::COMMAND_RANGES; range++) {
@@ -2348,6 +2358,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			_virtual_geometry_raster(p_render_data, true, depth_framebuffer);
 			RD::get_singleton()->draw_command_end_label();
 		}
+	}
+	if (vg_software && virtual_geometry->get_tile_buffer().is_valid()) {
+		RD::get_singleton()->draw_command_begin_label("Classify Virtual Geometry Material Tiles");
+		virtual_geometry->classify_software_tiles();
+		RD::get_singleton()->draw_command_end_label();
 	}
 
 	{
@@ -4428,6 +4443,7 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 		p_surface->vg_material_params = RID();
 	}
 	p_surface->vg_material_visibility = RID();
+	p_surface->vg_material_tiles = RID();
 	p_surface->vg_material_slot = UINT32_MAX;
 	p_surface->vg_raster_flags = 0;
 	if (p_surface->vg_work_buffer.is_valid()) {
@@ -4596,7 +4612,7 @@ void RenderForwardClustered::_virtual_geometry_raster(const RenderDataRD *p_rend
 	}
 	const Size2i size = p_render_data->render_buffers->get_internal_size();
 	if (!p_late) {
-		virtual_geometry->begin_software_raster(size);
+		virtual_geometry->begin_software_raster(size, virtual_geometry_camera_surface_count);
 	}
 	const Projection projection = p_render_data->scene_data->get_cam_projection();
 
@@ -4696,7 +4712,8 @@ void RenderForwardClustered::_virtual_geometry_material_update(GeometryInstanceS
 		p_surface->vg_material_slot = p_slot;
 		p_surface->vg_material_size = size;
 	}
-	if (p_surface->vg_material_visibility == visibility && p_surface->vg_material_uniform_set.is_valid() && rd->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
+	const RID tiles = virtual_geometry->get_tile_buffer();
+	if (p_surface->vg_material_visibility == visibility && p_surface->vg_material_tiles == tiles && p_surface->vg_material_uniform_set.is_valid() && rd->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
 		return;
 	}
 	if (p_surface->vg_material_uniform_set.is_valid() && rd->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
@@ -4718,8 +4735,10 @@ void RenderForwardClustered::_virtual_geometry_material_update(GeometryInstanceS
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, buffers[i]));
 	}
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, p_surface->vg_material_params));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, tiles));
 	p_surface->vg_material_uniform_set = rd->uniform_set_create(uniforms, p_shader, 4);
 	p_surface->vg_material_visibility = visibility;
+	p_surface->vg_material_tiles = tiles;
 }
 
 bool RenderForwardClustered::_virtual_geometry_occlusion(const RenderDataRD *p_render_data) {

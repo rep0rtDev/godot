@@ -93,6 +93,15 @@ VirtualGeometryEffect::VirtualGeometryEffect() {
 		raster_pipeline = RD::get_singleton()->compute_pipeline_create(raster_shader.version_get_shader(raster_shader_version, 0));
 		resolve_shader.initialize(raster_modes);
 		resolve_shader_version = resolve_shader.version_create();
+		Vector<String> tiles_modes;
+		tiles_modes.push_back("\n#define MODE_COUNT\n");
+		tiles_modes.push_back("\n#define MODE_PREFIX\n");
+		tiles_modes.push_back("\n#define MODE_FILL\n");
+		tiles_shader.initialize(tiles_modes);
+		tiles_shader_version = tiles_shader.version_create();
+		for (int i = 0; i < TILES_MAX; i++) {
+			tiles_pipelines[i] = RD::get_singleton()->compute_pipeline_create(tiles_shader.version_get_shader(tiles_shader_version, i));
+		}
 	}
 
 	Vector<String> hzb_modes;
@@ -180,9 +189,16 @@ VirtualGeometryEffect::~VirtualGeometryEffect() {
 	if (entry_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(entry_buffer);
 	}
+	if (tile_command_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(tile_command_buffer);
+	}
+	if (tile_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(tile_buffer);
+	}
 	if (raster_shader_version.is_valid()) {
 		raster_shader.version_free(raster_shader_version);
 		resolve_shader.version_free(resolve_shader_version);
+		tiles_shader.version_free(tiles_shader_version);
 	}
 	hzb_shader.version_free(hzb_shader_version);
 	RD::get_singleton()->free_rid(stats_buffer);
@@ -277,7 +293,7 @@ RID VirtualGeometryEffect::create_uniform_set(RID p_cluster_buffer, RID p_comman
 	return RD::get_singleton()->uniform_set_create(uniforms, get_shader(p_mode), 0);
 }
 
-void VirtualGeometryEffect::begin_software_raster(const Size2i &p_size) {
+void VirtualGeometryEffect::begin_software_raster(const Size2i &p_size, uint32_t p_slot_count) {
 	ERR_FAIL_COND(!supports_software_raster);
 	RD *rd = RD::get_singleton();
 	const uint32_t visibility_size_bytes = uint32_t(p_size.x) * uint32_t(p_size.y) * sizeof(uint64_t);
@@ -289,7 +305,28 @@ void VirtualGeometryEffect::begin_software_raster(const Size2i &p_size) {
 		visibility_size = p_size;
 		raster_frame_uniform_set = RID();
 		resolve_uniform_set = RID();
+		tiles_uniform_set = RID();
 	}
+	// A tile has 64 pixels, so it lands in at most 64 slot lists; that bounds the lists exactly.
+	const uint32_t tile_count = ((p_size.x + TILE_SIZE - 1) / TILE_SIZE) * ((p_size.y + TILE_SIZE - 1) / TILE_SIZE);
+	const uint32_t tile_words = p_slot_count + tile_count * MIN(p_slot_count, TILE_SIZE * TILE_SIZE);
+	if (tile_buffer.is_null() || tile_buffer_words < tile_words) {
+		if (tile_buffer.is_valid()) {
+			rd->free_rid(tile_buffer);
+		}
+		tile_buffer_words = MAX(tile_words, 1u);
+		tile_buffer = rd->storage_buffer_create(tile_buffer_words * sizeof(uint32_t));
+		tiles_uniform_set = RID();
+	}
+	if (tile_command_buffer.is_null() || tile_command_capacity < p_slot_count) {
+		if (tile_command_buffer.is_valid()) {
+			rd->free_rid(tile_command_buffer);
+		}
+		tile_command_capacity = MAX(p_slot_count, 1u);
+		tile_command_buffer = rd->storage_buffer_create(tile_command_capacity * TILE_COMMAND_STRIDE, Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+		tiles_uniform_set = RID();
+	}
+	tile_slot_count = p_slot_count;
 	if (entry_buffer.is_null()) {
 		entry_buffer = rd->storage_buffer_create(sizeof(uint32_t) * 2 + sizeof(uint32_t) * 2 * ENTRY_CAPACITY);
 	}
@@ -315,6 +352,47 @@ RID VirtualGeometryEffect::create_raster_uniform_set(RID p_cluster_buffer, RID p
 		uniforms.push_back(u);
 	}
 	return RD::get_singleton()->uniform_set_create(uniforms, const_cast<VirtualGeometryRasterShaderRD &>(raster_shader).version_get_shader(raster_shader_version, 0), 0);
+}
+
+void VirtualGeometryEffect::classify_software_tiles() {
+	ERR_FAIL_COND(tile_buffer.is_null() || visibility_buffer.is_null());
+	if (tile_slot_count == 0) {
+		return;
+	}
+	RD *rd = RD::get_singleton();
+	if (!tiles_uniform_set.is_valid() || !rd->uniform_set_is_valid(tiles_uniform_set)) {
+		Vector<RD::Uniform> uniforms;
+		const RID buffers[4] = { visibility_buffer, entry_buffer, tile_buffer, tile_command_buffer };
+		for (uint32_t i = 0; i < 4; i++) {
+			uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, buffers[i]));
+		}
+		tiles_uniform_set = rd->uniform_set_create(uniforms, tiles_shader.version_get_shader(tiles_shader_version, TILES_COUNT), 0);
+	}
+	rd->buffer_clear(tile_command_buffer, 0, tile_slot_count * TILE_COMMAND_STRIDE);
+	rd->buffer_clear(tile_buffer, 0, tile_slot_count * sizeof(uint32_t));
+
+	TilesPushConstant push_constant = {};
+	push_constant.size[0] = visibility_size.x;
+	push_constant.size[1] = visibility_size.y;
+	push_constant.slot_count = tile_slot_count;
+	const uint32_t tiles_x = (visibility_size.x + TILE_SIZE - 1) / TILE_SIZE;
+	const uint32_t tiles_y = (visibility_size.y + TILE_SIZE - 1) / TILE_SIZE;
+
+	RD::ComputeListID compute_list = rd->compute_list_begin();
+	for (int mode = 0; mode < TILES_MAX; mode++) {
+		if (mode > 0) {
+			rd->compute_list_add_barrier(compute_list);
+		}
+		rd->compute_list_bind_compute_pipeline(compute_list, tiles_pipelines[mode]);
+		rd->compute_list_bind_uniform_set(compute_list, tiles_uniform_set, 0);
+		rd->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+		if (mode == TILES_PREFIX) {
+			rd->compute_list_dispatch(compute_list, 1, 1, 1);
+		} else {
+			rd->compute_list_dispatch(compute_list, tiles_x, tiles_y, 1);
+		}
+	}
+	rd->compute_list_end();
 }
 
 void VirtualGeometryEffect::resolve_software_depth(RID p_framebuffer) {

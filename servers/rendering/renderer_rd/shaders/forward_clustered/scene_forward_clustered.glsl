@@ -818,11 +818,24 @@ void _unpack_vertex_attributes(vec4 p_vertex_in, vec3 p_compressed_aabb_position
 }
 
 #ifdef MODE_VG_MATERIAL
-// Virtual geometry material pass: one fullscreen triangle, the fragment stage rebuilds the vertex outputs.
+// Virtual geometry material pass: one triangle per 8x8 tile, the fragment stage rebuilds the vertex outputs.
+// Tile lists of virtual_geometry_tiles.glsl; the draw starts at vertex 3 * (absolute index of its first tile).
+layout(set = 4, binding = 7, std430) restrict readonly buffer VGTiles {
+	uint data[];
+}
+vg_tiles;
+
+layout(location = 15) out flat uint vg_tile_interp;
+
 void main() {
 	instance_index_interp = draw_call.instance_index;
-	vec2 base = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
-	gl_Position = vec4(base * 2.0 - 1.0, 0.0, 1.0);
+	uint tile = vg_tiles.data[uint(gl_VertexIndex) / 3u + uint(gl_InstanceIndex)];
+	vg_tile_interp = tile;
+	// A right triangle with 16 px legs holds the whole tile, so no primitive edge crosses its 2x2 quads (a split
+	// quad loses the shared derivatives). The fragment stage discards what falls outside the tile.
+	const vec2 corners[3] = vec2[](vec2(0.0, 0.0), vec2(2.0, 0.0), vec2(0.0, 2.0));
+	vec2 pixel = (vec2(tile & 0xFFFFu, tile >> 16u) + corners[uint(gl_VertexIndex) % 3u]) * 8.0;
+	gl_Position = vec4(pixel * scene_data_block.data.screen_pixel_size * 2.0 - 1.0, 0.0, 1.0);
 }
 #else
 void main() {
@@ -1042,6 +1055,7 @@ layout(location = 9) in float dp_clip;
 
 #ifdef MODE_VG_MATERIAL
 uint instance_index_interp;
+layout(location = 15) in flat uint vg_tile_interp;
 #else
 layout(location = 10) in flat uint instance_index_interp;
 #endif
@@ -3340,6 +3354,10 @@ void fragment_shader(in SceneData scene_data) {
 
 void main() {
 #ifdef MODE_VG_MATERIAL
+	// Tiles are 8 px aligned, so this discards whole quads.
+	if (any(notEqual(uvec2(gl_FragCoord.xy) >> 3u, uvec2(vg_tile_interp & 0xFFFFu, vg_tile_interp >> 16u)))) {
+		discard;
+	}
 	uint vg_count = vg_quad_setup();
 	vec4 vg_color = vec4(0.0);
 	// One material evaluation per distinct triangle of the quad; each lane keeps the one of its own triangle.
