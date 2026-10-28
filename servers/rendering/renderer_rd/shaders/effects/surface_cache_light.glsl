@@ -135,8 +135,26 @@ layout(set = 2, binding = 4, std140) uniform Screen {
 	vec4 size; // internal width, height, ambient width, height.
 	vec4 misc; // z_far, frame, screen trace enabled, unused.
 	mat4 projection;
+	mat4 prev_view_projection;
 }
 screen;
+layout(set = 2, binding = 8, rgba16f) uniform restrict readonly image2D screen_probe_prev;
+layout(set = 2, binding = 9, rgba16f) uniform restrict readonly image2D reflection_history_prev;
+
+// Previous-frame history texel for a world position and the view depth it should hold.
+bool reproject(vec3 world, ivec2 size, out ivec2 r_texel, out float r_depth) {
+	vec4 clip = screen.prev_view_projection * vec4(world, 1.0);
+	if (clip.w <= 0.0) {
+		return false;
+	}
+	vec2 ndc = clip.xy / clip.w;
+	if (any(greaterThan(abs(ndc), vec2(1.0)))) {
+		return false;
+	}
+	r_texel = clamp(ivec2((ndc * 0.5 + 0.5) * vec2(size)), ivec2(0), size - 1);
+	r_depth = clip.w;
+	return true;
+}
 layout(set = 2, binding = 7) uniform texture2D hzb_buffer; // Reverse-Z, each mip keeps the farthest depth.
 #define HZB_MIPS 6
 
@@ -474,10 +492,18 @@ void main() {
 		imageStore(screen_probe_image, local, vec4(float(hits) / float(SCREEN_PROBE_RAYS), float(found) / float(SCREEN_PROBE_RAYS), dot(mean, vec3(1.0 / 3.0)), -view_pos.z));
 		return;
 	}
-	vec4 prev = imageLoad(screen_probe_image, local);
 	float depth = -view_pos.z;
-	// Keep history while the probe stays on the same surface (camera still or slow).
-	float w = (prev.a > 0.0 && abs(prev.a - depth) < 0.05 * depth) ? 0.125 : 1.0;
+	// Keep history while the reprojected probe lies on the same surface.
+	vec4 prev = vec4(0.0);
+	ivec2 prev_texel;
+	float prev_depth;
+	if (reproject(world, imageSize(screen_probe_prev), prev_texel, prev_depth)) {
+		prev = imageLoad(screen_probe_prev, prev_texel);
+		if (abs(prev.a - prev_depth) > 0.05 * prev_depth) {
+			prev.a = 0.0;
+		}
+	}
+	float w = prev.a > 0.0 ? 0.125 : 1.0;
 	imageStore(screen_probe_image, local, vec4(mix(prev.rgb, mean, w), depth));
 #endif
 
@@ -546,8 +572,16 @@ void main() {
 		return;
 	}
 	float depth = -view_pos.z;
-	vec4 prev = imageLoad(reflection_history, local);
-	float w = (prev.a > 0.0 && abs(prev.a - depth) < 0.05 * depth) ? mix(0.5, 0.1, clamp(roughness * 2.0, 0.0, 1.0)) : 1.0;
+	vec4 prev = vec4(0.0);
+	ivec2 prev_texel;
+	float prev_depth;
+	if (reproject(world, imageSize(reflection_history_prev), prev_texel, prev_depth)) {
+		prev = imageLoad(reflection_history_prev, prev_texel);
+		if (abs(prev.a - prev_depth) > 0.05 * prev_depth) {
+			prev.a = 0.0;
+		}
+	}
+	float w = prev.a > 0.0 ? mix(0.5, 0.1, clamp(roughness * 2.0, 0.0, 1.0)) : 1.0;
 	vec3 acc = mix(prev.rgb, radiance, w);
 	imageStore(reflection_history, local, vec4(acc, depth));
 	imageStore(reflection_image, local, vec4(acc, weight));

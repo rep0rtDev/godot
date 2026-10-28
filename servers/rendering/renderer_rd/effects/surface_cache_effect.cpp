@@ -109,7 +109,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	}
 	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4 + sizeof(float) * 8);
 	grid_buffer = RD::get_singleton()->storage_buffer_create(GRID * GRID * GRID * GRID_SLOTS * sizeof(uint32_t));
-	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8 + 16));
+	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8 + 16 + 16));
 	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 12);
 	{
 		RD::TextureFormat stf;
@@ -139,7 +139,7 @@ SurfaceCacheEffect::~SurfaceCacheEffect() {
 	if (light_shader_version.is_valid()) {
 		light_shader.version_free(light_shader_version);
 	}
-	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, dummy_sky_tex, screen_probe_texture, reflection_history, screen_params_buffer }) {
+	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, dummy_sky_tex, screen_probe_texture[0], screen_probe_texture[1], reflection_history[0], reflection_history[1], screen_params_buffer }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -653,36 +653,45 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 }
 
 void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness, RID p_ambient, RID p_reflection, RID p_hzb, const Size2i &p_internal_size, const Size2i &p_ambient_size, const Projection &p_projection, const Transform3D &p_cam_transform) {
+	history_parity ^= 1;
 	if (light_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(light_uniform_set) || sdf_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
 		return; // Nothing lit yet this frame.
 	}
 	Size2i probe_size = Size2i(Math::division_round_up(p_internal_size.x, 16), Math::division_round_up(p_internal_size.y, 16));
-	if (screen_probe_texture.is_null() || probe_size != screen_probe_size) {
-		if (screen_probe_texture.is_valid()) {
-			RD::get_singleton()->free_rid(screen_probe_texture);
+	if (screen_probe_texture[0].is_null() || probe_size != screen_probe_size) {
+		for (int i = 0; i < 2; i++) {
+			if (screen_probe_texture[i].is_valid()) {
+				RD::get_singleton()->free_rid(screen_probe_texture[i]);
+			}
 		}
 		RD::TextureFormat tf;
 		tf.width = probe_size.x;
 		tf.height = probe_size.y;
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
-		screen_probe_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
-		RD::get_singleton()->set_resource_name(screen_probe_texture, "Surface cache screen probes");
-		RD::get_singleton()->texture_clear(screen_probe_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		for (int i = 0; i < 2; i++) {
+			screen_probe_texture[i] = RD::get_singleton()->texture_create(tf, RD::TextureView());
+			RD::get_singleton()->set_resource_name(screen_probe_texture[i], "Surface cache screen probes");
+			RD::get_singleton()->texture_clear(screen_probe_texture[i], Color(0, 0, 0, 0), 0, 1, 0, 1);
+		}
 		screen_probe_size = probe_size;
 	}
-	if (reflection_history.is_null() || reflection_history_size != p_ambient_size) {
-		if (reflection_history.is_valid()) {
-			RD::get_singleton()->free_rid(reflection_history);
+	if (reflection_history[0].is_null() || reflection_history_size != p_ambient_size) {
+		for (int i = 0; i < 2; i++) {
+			if (reflection_history[i].is_valid()) {
+				RD::get_singleton()->free_rid(reflection_history[i]);
+			}
 		}
 		RD::TextureFormat tf;
 		tf.width = p_ambient_size.x;
 		tf.height = p_ambient_size.y;
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
-		reflection_history = RD::get_singleton()->texture_create(tf, RD::TextureView());
-		RD::get_singleton()->set_resource_name(reflection_history, "Surface cache reflection history");
-		RD::get_singleton()->texture_clear(reflection_history, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		for (int i = 0; i < 2; i++) {
+			reflection_history[i] = RD::get_singleton()->texture_create(tf, RD::TextureView());
+			RD::get_singleton()->set_resource_name(reflection_history[i], "Surface cache reflection history");
+			RD::get_singleton()->texture_clear(reflection_history[i], Color(0, 0, 0, 0), 0, 1, 0, 1);
+		}
 		reflection_history_size = p_ambient_size;
 	}
 
@@ -692,11 +701,19 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		float size[4];
 		float misc[4];
 		float projection[16];
+		float prev_view_projection[16];
 	} sp;
 	Projection correction;
 	correction.set_depth_correction(true);
 	MaterialStorage::store_camera((correction * p_projection).inverse(), sp.inv_projection);
 	MaterialStorage::store_camera(correction * p_projection, sp.projection);
+	Projection view_projection = correction * p_projection * Projection(p_cam_transform.affine_inverse());
+	if (!has_prev_view_projection) {
+		prev_view_projection = view_projection;
+		has_prev_view_projection = true;
+	}
+	MaterialStorage::store_camera(prev_view_projection, sp.prev_view_projection);
+	prev_view_projection = view_projection;
 	MaterialStorage::store_transform(p_cam_transform, sp.cam_transform);
 	sp.size[0] = p_internal_size.x;
 	sp.size[1] = p_internal_size.y;
@@ -709,7 +726,7 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	RD::get_singleton()->buffer_update(screen_params_buffer, 0, sizeof(ScreenParams), &sp);
 
 	RID shader = light_shader.version_get_shader(light_shader_version, LIGHT_MODE_SCREEN_PROBES);
-	if (screen_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(screen_uniform_set) || screen_uniform_set_depth != p_depth || screen_uniform_set_ambient != p_ambient || screen_uniform_set_reflection != p_reflection || screen_uniform_set_hzb != p_hzb) {
+	if (screen_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(screen_uniform_set) || screen_uniform_set_depth != p_depth || screen_uniform_set_ambient != p_ambient || screen_uniform_set_reflection != p_reflection || screen_uniform_set_hzb != p_hzb || screen_uniform_set_parity != history_parity) {
 		Vector<RD::Uniform> uniforms;
 		auto add = [&](RD::UniformType p_type, int p_binding, RID p_rid) {
 			RD::Uniform u;
@@ -720,12 +737,14 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 		};
 		add(RD::UNIFORM_TYPE_TEXTURE, 0, p_depth);
 		add(RD::UNIFORM_TYPE_TEXTURE, 1, p_normal_roughness);
-		add(RD::UNIFORM_TYPE_IMAGE, 2, screen_probe_texture);
+		add(RD::UNIFORM_TYPE_IMAGE, 2, screen_probe_texture[history_parity]);
 		add(RD::UNIFORM_TYPE_IMAGE, 3, p_ambient);
 		add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, screen_params_buffer);
 		add(RD::UNIFORM_TYPE_IMAGE, 5, p_reflection);
-		add(RD::UNIFORM_TYPE_IMAGE, 6, reflection_history);
+		add(RD::UNIFORM_TYPE_IMAGE, 6, reflection_history[history_parity]);
 		add(RD::UNIFORM_TYPE_TEXTURE, 7, p_hzb.is_valid() ? p_hzb : p_depth);
+		add(RD::UNIFORM_TYPE_IMAGE, 8, screen_probe_texture[history_parity ^ 1]);
+		add(RD::UNIFORM_TYPE_IMAGE, 9, reflection_history[history_parity ^ 1]);
 		if (screen_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(screen_uniform_set)) {
 			RD::get_singleton()->free_rid(screen_uniform_set);
 		}
@@ -738,6 +757,7 @@ void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness,
 	last_ambient = p_ambient;
 	last_reflection = p_reflection;
 	screen_uniform_set_hzb = p_hzb;
+	screen_uniform_set_parity = history_parity;
 	uint32_t pc[4] = { 0, light_debug, 0, 0 };
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
 	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[LIGHT_MODE_SCREEN_PROBES]);

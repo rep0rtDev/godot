@@ -100,7 +100,7 @@ public:
 	void screen_probes_pass(RID p_depth, RID p_normal_roughness, RID p_ambient, RID p_reflection, RID p_hzb, const Size2i &p_internal_size, const Size2i &p_ambient_size, const Projection &p_projection, const Transform3D &p_cam_transform);
 	RID get_last_reflection_texture() const { return last_reflection; }
 	RID get_probe_texture() const { return probes; }
-	RID get_screen_probe_texture() const { return screen_probe_texture; }
+	RID get_screen_probe_texture() const { return screen_probe_texture[history_parity]; }
 	RID get_last_ambient_texture() const { return last_ambient; }
 
 	RID get_albedo_texture() const { return albedo; }
@@ -120,7 +120,11 @@ private:
 
 	bool enabled = false;
 	bool screen_probes = true;
-	RID screen_probe_texture;
+	RID screen_probe_texture[2];
+	int history_parity = 0;
+	int screen_uniform_set_parity = -1;
+	Projection prev_view_projection;
+	bool has_prev_view_projection = false;
 	Size2i screen_probe_size;
 	RID screen_params_buffer;
 	RID screen_uniform_set;
@@ -128,7 +132,7 @@ private:
 	RID screen_uniform_set_ambient;
 	RID last_ambient;
 	RID last_reflection;
-	RID reflection_history;
+	RID reflection_history[2];
 	Size2i reflection_history_size;
 	RID screen_uniform_set_reflection;
 	RID screen_uniform_set_hzb;

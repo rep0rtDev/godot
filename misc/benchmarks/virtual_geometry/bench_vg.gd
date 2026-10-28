@@ -11,6 +11,8 @@ var cam: Camera3D
 var wall: MeshInstance3D
 var wall_off := -1
 var move_frame := -1
+var cam_move := 0.0
+var cam_x := 0.0
 var first_mi: MeshInstance3D
 var times := PackedFloat64Array()
 var gpu_times := PackedFloat64Array()
@@ -138,6 +140,8 @@ func _init() -> void:
 		root.add_child(wall)
 	wall_off = int(arg("wall_off", "-1"))
 	move_frame = int(arg("move", "-1"))
+	cam_move = float(arg("cam_move", "0"))
+	cam_x = float(arg("cam_x", "0"))
 	if arg("backdrop", "0") == "1":
 		# Transparent plane behind the grid. The transparent pass depth-tests against the finished opaque depth,
 		# so it covers any pixel whose depth was lost, regardless of draw order.
@@ -181,7 +185,7 @@ func _init() -> void:
 	light.rotation_degrees = Vector3(-50, 30, 0)
 	root.add_child(light)
 	cam = Camera3D.new()
-	cam.position = Vector3(side * 1.5, 6, 8)
+	cam.position = Vector3(side * 1.5 + cam_x, 6, 8)
 	cam.rotation_degrees = Vector3(-15, 0, 0)
 	if arg("view", "grid") == "row":
 		# Low camera looking down the columns, so spheres hide each other (depth resolve and occlusion checks).
@@ -196,6 +200,8 @@ func _init() -> void:
 	print("bench vg=%s count=%d tris_per_mesh=%d" % [use_vg, count, sm.get_mesh_arrays()[Mesh.ARRAY_INDEX].size() / 3])
 
 func _process(_delta: float) -> bool:
+	if cam_move != 0.0 and cam and frame > 0:
+		cam.position.x += cam_move
 	frame += 1
 	if first_mi and frame == move_frame:
 		# Moves one caster so that its cached shadow has to be redrawn.
