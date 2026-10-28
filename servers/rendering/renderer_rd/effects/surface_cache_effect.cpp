@@ -31,6 +31,7 @@
 #include "surface_cache_effect.h"
 
 #include "core/config/project_settings.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/rendering_server.h"
@@ -50,7 +51,8 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		return;
 	}
 	debug_mode = GLOBAL_GET("rendering/global_illumination/surface_cache/debug/mode");
-	light_debug = debug_mode == 7 ? 1 : (debug_mode == 10 ? 2 : 0);
+	light_debug = debug_mode == 7 ? 1 : (debug_mode == 10 ? 2 : (debug_mode == 11 ? 3 : 0));
+	screen_probes = GLOBAL_GET("rendering/global_illumination/surface_cache/screen_probes");
 	atlas_size = GLOBAL_GET("rendering/global_illumination/surface_cache/atlas_size");
 	cards_per_frame = GLOBAL_GET("rendering/global_illumination/surface_cache/cards_per_frame");
 	texel_density = GLOBAL_GET("rendering/global_illumination/surface_cache/texels_per_meter");
@@ -99,7 +101,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		RD::get_singleton()->texture_clear(t, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	}
 
-	Vector<String> modes = { "\n#define MODE_DIRECT\n", "\n#define MODE_PROBES\n", "\n#define MODE_RESOLVE\n" };
+	Vector<String> modes = { "\n#define MODE_DIRECT\n", "\n#define MODE_PROBES\n", "\n#define MODE_RESOLVE\n", "\n#define MODE_SCREEN_PROBES\n", "\n#define MODE_SCREEN_RESOLVE\n" };
 	light_shader.initialize(modes);
 	light_shader_version = light_shader.version_create();
 	for (int i = 0; i < LIGHT_MODE_MAX; i++) {
@@ -107,6 +109,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	}
 	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4 + sizeof(float) * 8);
 	grid_buffer = RD::get_singleton()->storage_buffer_create(GRID * GRID * GRID * GRID_SLOTS * sizeof(uint32_t));
+	screen_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * (32 + 8));
 	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 9);
 	{
 		RD::TextureFormat dtf;
@@ -116,7 +119,9 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		dtf.depth = 1;
 		dtf.format = RD::DATA_FORMAT_R8_UNORM;
 		dtf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT;
+		dtf.usage_bits |= RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 		dummy_sdf_tex = RD::get_singleton()->texture_create(dtf, RD::TextureView());
+		RD::get_singleton()->texture_clear(dummy_sdf_tex, Color(1, 1, 1, 1), 0, 1, 0, 1);
 	}
 }
 
@@ -125,7 +130,7 @@ SurfaceCacheEffect::~SurfaceCacheEffect() {
 	if (light_shader_version.is_valid()) {
 		light_shader.version_free(light_shader_version);
 	}
-	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex }) {
+	for (RID rid : { framebuffer, depth_stencil, depth, direct, final, probes, emission, orm, normal, albedo, card_buffer, instance_buffer, grid_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex, screen_probe_texture, screen_params_buffer }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -601,7 +606,7 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 	}
 
 	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
-	for (int mode = 0; mode < LIGHT_MODE_MAX; mode++) {
+	for (int mode = 0; mode <= LIGHT_MODE_RESOLVE; mode++) {
 		RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[mode]);
 		RD::get_singleton()->compute_list_bind_uniform_set(cl, light_uniform_set, 0);
 		RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
@@ -617,5 +622,86 @@ void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_direct
 		}
 		RD::get_singleton()->compute_list_add_barrier(cl);
 	}
+	RD::get_singleton()->compute_list_end();
+}
+
+void SurfaceCacheEffect::screen_probes_pass(RID p_depth, RID p_normal_roughness, RID p_ambient, const Size2i &p_internal_size, const Size2i &p_ambient_size, const Projection &p_projection, const Transform3D &p_cam_transform) {
+	if (light_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(light_uniform_set) || sdf_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
+		return; // Nothing lit yet this frame.
+	}
+	Size2i probe_size = Size2i(Math::division_round_up(p_internal_size.x, 16), Math::division_round_up(p_internal_size.y, 16));
+	if (screen_probe_texture.is_null() || probe_size != screen_probe_size) {
+		if (screen_probe_texture.is_valid()) {
+			RD::get_singleton()->free_rid(screen_probe_texture);
+		}
+		RD::TextureFormat tf;
+		tf.width = probe_size.x;
+		tf.height = probe_size.y;
+		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		screen_probe_texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		RD::get_singleton()->set_resource_name(screen_probe_texture, "Surface cache screen probes");
+		RD::get_singleton()->texture_clear(screen_probe_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		screen_probe_size = probe_size;
+	}
+
+	struct ScreenParams {
+		float inv_projection[16];
+		float cam_transform[16];
+		float size[4];
+		float misc[4];
+	} sp;
+	Projection correction;
+	correction.set_depth_correction(true);
+	MaterialStorage::store_camera((correction * p_projection).inverse(), sp.inv_projection);
+	MaterialStorage::store_transform(p_cam_transform, sp.cam_transform);
+	sp.size[0] = p_internal_size.x;
+	sp.size[1] = p_internal_size.y;
+	sp.size[2] = p_ambient_size.x;
+	sp.size[3] = p_ambient_size.y;
+	sp.misc[0] = p_projection.get_z_far();
+	sp.misc[1] = float(frame % 4096);
+	sp.misc[2] = sp.misc[3] = 0.0f;
+	RD::get_singleton()->buffer_update(screen_params_buffer, 0, sizeof(ScreenParams), &sp);
+
+	RID shader = light_shader.version_get_shader(light_shader_version, LIGHT_MODE_SCREEN_PROBES);
+	if (screen_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(screen_uniform_set) || screen_uniform_set_depth != p_depth || screen_uniform_set_ambient != p_ambient) {
+		Vector<RD::Uniform> uniforms;
+		auto add = [&](RD::UniformType p_type, int p_binding, RID p_rid) {
+			RD::Uniform u;
+			u.uniform_type = p_type;
+			u.binding = p_binding;
+			u.append_id(p_rid);
+			uniforms.push_back(u);
+		};
+		add(RD::UNIFORM_TYPE_TEXTURE, 0, p_depth);
+		add(RD::UNIFORM_TYPE_TEXTURE, 1, p_normal_roughness);
+		add(RD::UNIFORM_TYPE_IMAGE, 2, screen_probe_texture);
+		add(RD::UNIFORM_TYPE_IMAGE, 3, p_ambient);
+		add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 4, screen_params_buffer);
+		if (screen_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(screen_uniform_set)) {
+			RD::get_singleton()->free_rid(screen_uniform_set);
+		}
+		screen_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, shader, 2);
+		screen_uniform_set_depth = p_depth;
+		screen_uniform_set_ambient = p_ambient;
+	}
+
+	last_ambient = p_ambient;
+	uint32_t pc[4] = { 0, light_debug, 0, 0 };
+	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[LIGHT_MODE_SCREEN_PROBES]);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, light_uniform_set, 0);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, screen_uniform_set, 2);
+	RD::get_singleton()->compute_list_set_push_constant(cl, pc, sizeof(pc));
+	RD::get_singleton()->compute_list_dispatch(cl, Math::division_round_up(uint32_t(probe_size.x), 8u), Math::division_round_up(uint32_t(probe_size.y), 8u), 1);
+	RD::get_singleton()->compute_list_add_barrier(cl);
+	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipelines[LIGHT_MODE_SCREEN_RESOLVE]);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, light_uniform_set, 0);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, screen_uniform_set, 2);
+	RD::get_singleton()->compute_list_set_push_constant(cl, pc, sizeof(pc));
+	RD::get_singleton()->compute_list_dispatch(cl, Math::division_round_up(uint32_t(p_ambient_size.x), 8u), Math::division_round_up(uint32_t(p_ambient_size.y), 8u), 1);
 	RD::get_singleton()->compute_list_end();
 }

@@ -87,7 +87,12 @@ public:
 	void light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult, const Vector3 &p_sky_radiance);
 	RID get_direct_texture() const { return direct; }
 	RID get_final_texture() const { return final; }
+	bool screen_probes_enabled() const { return screen_probes; }
+	// Screen probes traced into the surface cache, resolved into the GI ambient buffer (alpha 1 where valid).
+	void screen_probes_pass(RID p_depth, RID p_normal_roughness, RID p_ambient, const Size2i &p_internal_size, const Size2i &p_ambient_size, const Projection &p_projection, const Transform3D &p_cam_transform);
 	RID get_probe_texture() const { return probes; }
+	RID get_screen_probe_texture() const { return screen_probe_texture; }
+	RID get_last_ambient_texture() const { return last_ambient; }
 
 	RID get_albedo_texture() const { return albedo; }
 	RID get_normal_texture() const { return normal; }
@@ -105,6 +110,14 @@ private:
 	static SurfaceCacheEffect *singleton;
 
 	bool enabled = false;
+	bool screen_probes = true;
+	RID screen_probe_texture;
+	Size2i screen_probe_size;
+	RID screen_params_buffer;
+	RID screen_uniform_set;
+	RID screen_uniform_set_depth;
+	RID screen_uniform_set_ambient;
+	RID last_ambient;
 	uint32_t debug_mode = 0;
 	int atlas_size = 4096;
 	int cards_per_frame = 300;
@@ -151,6 +164,8 @@ private:
 		LIGHT_MODE_DIRECT,
 		LIGHT_MODE_PROBES,
 		LIGHT_MODE_RESOLVE,
+		LIGHT_MODE_SCREEN_PROBES,
+		LIGHT_MODE_SCREEN_RESOLVE,
 		LIGHT_MODE_MAX
 	};
 	RID light_pipelines[LIGHT_MODE_MAX];

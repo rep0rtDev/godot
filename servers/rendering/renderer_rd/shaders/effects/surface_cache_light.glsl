@@ -97,6 +97,38 @@ sdf;
 
 layout(set = 1, binding = 1) uniform texture3D sdf_cascades[MAX_CASCADES];
 
+#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE)
+// Screen probes: one per SCREEN_PROBE_SIZE pixels, cosine rays through the SDF into the surface cache, resolved into
+// the GI ambient buffer the forward pass already reads.
+#define SCREEN_PROBE_SIZE 16
+#define SCREEN_PROBE_RAYS 16
+
+layout(set = 2, binding = 0) uniform texture2D depth_buffer;
+layout(set = 2, binding = 1) uniform texture2D normal_roughness_buffer;
+layout(set = 2, binding = 2, rgba16f) uniform restrict image2D screen_probe_image; // rgb radiance, a view depth.
+layout(set = 2, binding = 3, rgba16f) uniform restrict writeonly image2D ambient_image;
+layout(set = 2, binding = 4, std140) uniform Screen {
+	mat4 inv_projection;
+	mat4 cam_transform;
+	vec4 size; // internal width, height, ambient width, height.
+	vec4 misc; // z_far, frame, unused, unused.
+}
+screen;
+
+// View-space position of an internal pixel; false for the sky.
+bool screen_position(ivec2 pixel, out vec3 r_view, out vec3 r_normal) {
+	float depth = texelFetch(sampler2D(depth_buffer, nearest_sampler), pixel, 0).r;
+	vec4 pos = vec4((vec2(pixel) + 0.5) / screen.size.xy * 2.0 - 1.0, depth, 1.0);
+	pos = screen.inv_projection * pos;
+	r_view = pos.xyz / pos.w;
+	if (-r_view.z >= screen.misc.x * 0.98) {
+		return false;
+	}
+	r_normal = normalize(texelFetch(sampler2D(normal_roughness_buffer, nearest_sampler), pixel, 0).xyz * 2.0 - 1.0);
+	return true;
+}
+#endif
+
 layout(push_constant, std430) uniform Push {
 	uint card;
 	uint debug;
@@ -115,9 +147,32 @@ int find_cascade(vec3 p) {
 	return -1;
 }
 
+// The cascade index differs between threads, so the texture array is indexed with constants only (dynamic
+// non-uniform indexing of texture arrays is undefined without the nonuniform extension).
+float sdf_fetch(int j, vec3 uvw) {
+	switch (j) {
+		case 0:
+			return texture(sampler3D(sdf_cascades[0], linear_sampler), uvw).r;
+		case 1:
+			return texture(sampler3D(sdf_cascades[1], linear_sampler), uvw).r;
+		case 2:
+			return texture(sampler3D(sdf_cascades[2], linear_sampler), uvw).r;
+		case 3:
+			return texture(sampler3D(sdf_cascades[3], linear_sampler), uvw).r;
+		case 4:
+			return texture(sampler3D(sdf_cascades[4], linear_sampler), uvw).r;
+		case 5:
+			return texture(sampler3D(sdf_cascades[5], linear_sampler), uvw).r;
+		case 6:
+			return texture(sampler3D(sdf_cascades[6], linear_sampler), uvw).r;
+		default:
+			return texture(sampler3D(sdf_cascades[7], linear_sampler), uvw).r;
+	}
+}
+
 float sdf_sample(vec3 p, int j) {
 	vec3 uvw = (p - sdf.cascades[j].xyz) * sdf.cascades[j].w / sdf.info.x;
-	return texture(sampler3D(sdf_cascades[j], linear_sampler), uvw).r * 255.0 - 1.0; // Cells.
+	return sdf_fetch(j, uvw) * 255.0 - 1.0; // Cells.
 }
 
 // Sphere trace from origin along dir (world space). Returns true on a hit with the hit point and its cascade.
@@ -276,8 +331,99 @@ float hash1(vec3 p) {
 }
 
 void main() {
+#if defined(MODE_SCREEN_PROBES) || defined(MODE_SCREEN_RESOLVE)
+	ivec2 local = ivec2(gl_GlobalInvocationID.xy);
+#else
 	CardData card = cards.data[push.card];
 	ivec2 local = ivec2(gl_GlobalInvocationID.xy);
+#endif
+
+#ifdef MODE_SCREEN_PROBES
+	ivec2 probe_count = (ivec2(screen.size.xy) + SCREEN_PROBE_SIZE - 1) / SCREEN_PROBE_SIZE;
+	if (any(greaterThanEqual(local, probe_count))) {
+		return;
+	}
+	ivec2 pixel = min(local * SCREEN_PROBE_SIZE + SCREEN_PROBE_SIZE / 2, ivec2(screen.size.xy) - 1);
+	vec3 view_pos, view_normal;
+	if (!screen_position(pixel, view_pos, view_normal)) {
+		imageStore(screen_probe_image, local, vec4(0.0));
+		return;
+	}
+	vec3 world = (screen.cam_transform * vec4(view_pos, 1.0)).xyz;
+	vec3 normal = normalize(mat3(screen.cam_transform) * view_normal);
+	vec3 origin = world + normal * 0.02;
+	vec3 tangent = normalize(abs(normal.y) < 0.99 ? cross(normal, vec3(0, 1, 0)) : cross(normal, vec3(1, 0, 0)));
+	vec3 bitangent = cross(normal, tangent);
+	float frame = screen.misc.y;
+	vec3 sum = vec3(0.0);
+	int hits = 0;
+	int found = 0;
+	for (int r = 0; r < SCREEN_PROBE_RAYS; r++) {
+		// Stratified over a 4x4 grid, jittered per frame.
+		vec2 cell = vec2(r % 4, r / 4);
+		vec2 u = (cell + vec2(hash1(vec3(local, frame * 16.0 + float(r))), hash1(vec3(local.yx, frame * 16.0 + float(r) + 17.0)))) / 4.0;
+		float phi = 2.0 * M_PI * u.x;
+		float sr = sqrt(u.y);
+		vec3 dir = tangent * (cos(phi) * sr) + bitangent * (sin(phi) * sr) + normal * sqrt(max(0.0, 1.0 - u.y));
+		vec3 hit;
+		int cascade;
+		vec3 radiance = params.sky.rgb;
+		if (sdf_trace(origin, dir, 100.0, hit, cascade)) {
+			hits++;
+			vec3 hn = sdf_normal(hit, cascade);
+			float cell_size = 1.0 / sdf.cascades[cascade].w;
+			if (sample_cards(hit, hn, 1.5 * cell_size, radiance)) {
+				found++;
+			} else {
+				radiance = vec3(0.0);
+			}
+		}
+		sum += radiance;
+	}
+	vec3 mean = sum / float(SCREEN_PROBE_RAYS);
+	if (push.debug == 3u) {
+		// Diagnostics: hit fraction, card fraction, mean radiance.
+		imageStore(screen_probe_image, local, vec4(float(hits) / float(SCREEN_PROBE_RAYS), float(found) / float(SCREEN_PROBE_RAYS), dot(mean, vec3(1.0 / 3.0)), -view_pos.z));
+		return;
+	}
+	vec4 prev = imageLoad(screen_probe_image, local);
+	float depth = -view_pos.z;
+	// Keep history while the probe stays on the same surface (camera still or slow).
+	float w = (prev.a > 0.0 && abs(prev.a - depth) < 0.05 * depth) ? 0.125 : 1.0;
+	imageStore(screen_probe_image, local, vec4(mix(prev.rgb, mean, w), depth));
+#endif
+
+#ifdef MODE_SCREEN_RESOLVE
+	if (any(greaterThanEqual(local, ivec2(screen.size.zw)))) {
+		return;
+	}
+	ivec2 pixel = ivec2((vec2(local) + 0.5) * screen.size.xy / screen.size.zw);
+	vec3 view_pos, view_normal;
+	if (!screen_position(pixel, view_pos, view_normal)) {
+		imageStore(ambient_image, local, vec4(0.0));
+		return;
+	}
+	float depth = -view_pos.z;
+	ivec2 probe_count = (ivec2(screen.size.xy) + SCREEN_PROBE_SIZE - 1) / SCREEN_PROBE_SIZE;
+	vec2 pf = (vec2(pixel) + 0.5) / float(SCREEN_PROBE_SIZE) - 0.5;
+	ivec2 p0 = clamp(ivec2(floor(pf)), ivec2(0), probe_count - 1);
+	ivec2 p1 = min(p0 + 1, probe_count - 1);
+	vec2 f = clamp(pf - vec2(p0), 0.0, 1.0);
+	vec3 sum = vec3(0.0);
+	float wsum = 0.0;
+	for (int i = 0; i < 4; i++) {
+		ivec2 pc = ivec2(i % 2 == 0 ? p0.x : p1.x, i / 2 == 0 ? p0.y : p1.y);
+		vec4 probe = imageLoad(screen_probe_image, pc);
+		if (probe.a <= 0.0) {
+			continue;
+		}
+		float w = (i % 2 == 0 ? 1.0 - f.x : f.x) * (i / 2 == 0 ? 1.0 - f.y : f.y);
+		w *= 1.0 / (1.0 + 8.0 * abs(probe.a - depth) / depth); // Depth-aware weight.
+		sum += probe.rgb * w;
+		wsum += w;
+	}
+	imageStore(ambient_image, local, wsum > 0.0 ? vec4(sum / wsum, 1.0) : vec4(0.0));
+#endif
 
 #ifdef MODE_DIRECT
 	if (any(greaterThanEqual(local, card.rect.zw))) {

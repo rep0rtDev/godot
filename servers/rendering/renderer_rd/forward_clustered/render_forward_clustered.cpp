@@ -2449,6 +2449,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				sky_radiance = Vector3(c.r, c.g, c.b) * e;
 			}
 			surface_cache->light_cards(ls->get_directional_light_buffer(), p_render_data->directional_light_count, ls->get_omni_light_buffer(), ls->get_omni_light_count(), ls->get_spot_light_buffer(), ls->get_spot_light_count(), p_render_data->scene_data->cam_transform, sdf_cascades, sdf_offsets, sdf_grid_size, sdf_y_mult, sky_radiance);
+			if (using_sdfgi && surface_cache->screen_probes_enabled() && rb_data.is_valid() && rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
+				RENDER_TIMESTAMP("Surface Cache Screen Probes");
+				RD::TextureFormat atf = rb->get_texture_format(RB_SCOPE_GI, RB_TEX_AMBIENT);
+				surface_cache->screen_probes_pass(rb->get_depth_texture(), rb_data->get_normal_roughness(0), rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT), rb->get_internal_size(), Size2i(atf.width, atf.height), p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform);
+			}
 			if (OS::get_singleton()->is_stdout_verbose() && (RSG::rasterizer->get_frame_number() % 30) == 0) {
 				const RendererRD::SurfaceCacheEffect::Stats &st = surface_cache->get_stats();
 				print_line(vformat("surface cache light: cards %d dir %d omni %d spot %d sdf cascades %d", st.lit, p_render_data->directional_light_count, ls->get_omni_light_count(), ls->get_spot_light_count(), sdf_cascades.size()));
@@ -2887,6 +2892,12 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 			case 9:
 			case 10:
 				atlas = surface_cache->get_probe_texture();
+				break;
+			case 11:
+				atlas = surface_cache->get_screen_probe_texture();
+				break;
+			case 12:
+				atlas = surface_cache->get_last_ambient_texture();
 				break;
 			default:
 				atlas = surface_cache->get_final_texture();
