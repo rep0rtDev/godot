@@ -3775,6 +3775,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/smrt_rays", PROPERTY_HINT_RANGE, "0,16,1"), 4);
 	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/enabled", false);
 	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/screen_probes", true);
+	GLOBAL_DEF_RST("rendering/global_illumination/surface_cache/screen_trace", true);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/atlas_size", PROPERTY_HINT_ENUM, "1024,2048,4096"), 4096);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/surface_cache/cards_per_frame", PROPERTY_HINT_RANGE, "1,2000,1"), 300);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/surface_cache/texels_per_meter", PROPERTY_HINT_RANGE, "1,100,1"), 10.0);

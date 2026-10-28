@@ -133,9 +133,12 @@ layout(set = 2, binding = 4, std140) uniform Screen {
 	mat4 inv_projection;
 	mat4 cam_transform;
 	vec4 size; // internal width, height, ambient width, height.
-	vec4 misc; // z_far, frame, unused, unused.
+	vec4 misc; // z_far, frame, screen trace enabled, unused.
+	mat4 projection;
 }
 screen;
+layout(set = 2, binding = 7) uniform texture2D hzb_buffer; // Reverse-Z, each mip keeps the farthest depth.
+#define HZB_MIPS 6
 
 // View-space position of an internal pixel; false for the sky.
 bool screen_position(ivec2 pixel, out vec3 r_view, out vec3 r_normal) {
@@ -148,6 +151,49 @@ bool screen_position(ivec2 pixel, out vec3 r_view, out vec3 r_normal) {
 	}
 	r_normal = normalize(texelFetch(sampler2D(normal_roughness_buffer, nearest_sampler), pixel, 0).xyz * 2.0 - 1.0);
 	return true;
+}
+
+// Screen-space trace against the depth pyramid before the SDF: the hit comes from the depth buffer (thin geometry
+// the SDF does not resolve), lighting still from the surface cache. View-space origin and direction.
+bool screen_trace(vec3 origin, vec3 dir, out vec3 r_world, out vec3 r_normal) {
+	if (screen.misc.z < 0.5) {
+		return false;
+	}
+	vec2 hzb_size = vec2(textureSize(sampler2D(hzb_buffer, nearest_sampler), 0));
+	vec2 prev_px = vec2(-1.0);
+	float t = 0.04;
+	for (int i = 0; i < 24; i++) {
+		vec3 p = origin + dir * t;
+		vec4 clip = screen.projection * vec4(p, 1.0);
+		if (clip.w <= 0.0) {
+			return false;
+		}
+		vec3 ndc = clip.xyz / clip.w;
+		if (any(greaterThan(abs(ndc.xy), vec2(1.0)))) {
+			return false;
+		}
+		vec2 uv = ndc.xy * 0.5 + 0.5;
+		vec2 px = uv * hzb_size;
+		float step_px = prev_px.x < 0.0 ? 1.0 : length(px - prev_px);
+		prev_px = px;
+		float mip = clamp(floor(log2(max(step_px, 1.0))), 0.0, float(HZB_MIPS - 1));
+		float far_z = textureLod(sampler2D(hzb_buffer, nearest_sampler), uv, mip).r;
+		if (ndc.z < far_z) {
+			// Behind the farthest surface of the footprint: check the exact pixel and its thickness.
+			ivec2 pixel = ivec2(uv * screen.size.xy);
+			vec3 sp, sn;
+			if (screen_position(pixel, sp, sn)) {
+				float thickness = 0.25 + 0.03 * (-sp.z);
+				if (-p.z >= -sp.z && -p.z - (-sp.z) < thickness && dot(sn, dir) < 0.0) {
+					r_world = (screen.cam_transform * vec4(sp, 1.0)).xyz;
+					r_normal = normalize(mat3(screen.cam_transform) * sn);
+					return true;
+				}
+			}
+		}
+		t *= 1.3;
+	}
+	return false;
 }
 
 float screen_roughness(ivec2 pixel) {
@@ -405,7 +451,12 @@ void main() {
 		vec3 hit;
 		int cascade;
 		vec3 radiance = sky_radiance(dir);
-		if (sdf_trace(origin, dir, 100.0, hit, cascade)) {
+		vec3 s_hit, s_normal;
+		bool traced = false;
+		if (screen_trace(view_pos + view_normal * 0.02, transpose(mat3(screen.cam_transform)) * dir, s_hit, s_normal)) {
+			traced = sample_cards(s_hit, s_normal, 3.0 / sdf.cascades[0].w, radiance);
+		}
+		if (!traced && sdf_trace(origin, dir, 100.0, hit, cascade)) {
 			hits++;
 			vec3 hn = sdf_normal(hit, cascade);
 			float cell_size = 1.0 / sdf.cascades[cascade].w;
@@ -472,8 +523,16 @@ void main() {
 	int cascade;
 	vec3 radiance = sky_radiance(dir);
 	bool found = false;
-	bool hit_any = sdf_trace(origin, dir, 200.0, hit, cascade);
-	if (hit_any) {
+	vec3 s_hit, s_normal;
+	bool screen_hit = false;
+	if (screen_trace(view_pos + view_normal * 0.02, transpose(mat3(screen.cam_transform)) * dir, s_hit, s_normal)) {
+		found = sample_cards(s_hit, s_normal, 3.0 / sdf.cascades[0].w, radiance);
+		screen_hit = found;
+		hit = s_hit;
+		cascade = 0;
+	}
+	bool hit_any = found || sdf_trace(origin, dir, 200.0, hit, cascade);
+	if (hit_any && !found) {
 		vec3 hn = sdf_normal(hit, cascade);
 		float cell_size = 1.0 / sdf.cascades[cascade].w;
 		found = sample_cards(hit, hn, 1.5 * cell_size, radiance);
@@ -483,7 +542,7 @@ void main() {
 	}
 	if (push.debug == 3u) {
 		// Diagnostics: hit cascade (+1)/8, hit distance/32, card found, hit height (+8)/16 in alpha.
-		imageStore(reflection_image, local, vec4(hit_any ? float(cascade + 1) / 8.0 : 0.0, hit_any ? length(hit - origin) / 32.0 : 1.0, found ? 1.0 : 0.0, hit_any ? (hit.y + 8.0) / 16.0 : 0.0));
+		imageStore(reflection_image, local, vec4(screen_hit ? 1.0 : (hit_any ? float(cascade + 1) / 8.0 : 0.0), hit_any ? length(hit - origin) / 32.0 : 1.0, found ? 1.0 : 0.0, hit_any ? (hit.y + 8.0) / 16.0 : 0.0));
 		return;
 	}
 	float depth = -view_pos.z;
