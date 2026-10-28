@@ -1205,11 +1205,7 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 				}
 			}
 			if (VirtualGeometry::build(positions, normals, source_indices, vg_result)) {
-				Vector<int> vg_indices;
-				vg_indices.resize(vg_result.indices.size());
-				memcpy(vg_indices.ptrw(), vg_result.indices.ptr(), sizeof(uint32_t) * vg_result.indices.size());
-				arrays = p_arrays.duplicate();
-				arrays[RSE::ARRAY_INDEX] = vg_indices;
+				// The regular buffers keep the source mesh; cluster geometry of every level lives in the pages.
 				use_virtual_geometry = true;
 				p_compress_format |= RSE::ARRAY_FLAG_USE_VIRTUAL_GEOMETRY;
 			}
@@ -1425,8 +1421,25 @@ Error RenderingServer::mesh_create_surface_data_from_arrays(RenderingServerTypes
 	surface_data.lods = lods;
 	surface_data.uv_scale = uv_scale;
 	if (use_virtual_geometry) {
-		surface_data.vg_cluster_data = VirtualGeometry::pack(vg_result);
-		surface_data.vg_leaf_index_count = vg_result.leaf_index_count;
+		VirtualGeometryAttributes vg_attributes;
+		vg_attributes.positions = arrays[RSE::ARRAY_VERTEX];
+		if (arrays[RSE::ARRAY_NORMAL].get_type() == Variant::PACKED_VECTOR3_ARRAY) {
+			vg_attributes.normals = arrays[RSE::ARRAY_NORMAL];
+		}
+		if (arrays[RSE::ARRAY_TANGENT].get_type() == Variant::PACKED_FLOAT32_ARRAY) {
+			vg_attributes.tangents = arrays[RSE::ARRAY_TANGENT];
+		}
+		if (arrays[RSE::ARRAY_TEX_UV].get_type() == Variant::PACKED_VECTOR2_ARRAY) {
+			vg_attributes.uv = arrays[RSE::ARRAY_TEX_UV];
+		}
+		if (arrays[RSE::ARRAY_TEX_UV2].get_type() == Variant::PACKED_VECTOR2_ARRAY) {
+			vg_attributes.uv2 = arrays[RSE::ARRAY_TEX_UV2];
+		}
+		if (arrays[RSE::ARRAY_COLOR].get_type() == Variant::PACKED_COLOR_ARRAY) {
+			vg_attributes.colors = arrays[RSE::ARRAY_COLOR];
+		}
+		surface_data.vg_cluster_data = VirtualGeometry::pack(vg_result, vg_attributes);
+		surface_data.vg_leaf_index_count = index_array_len > 0 ? vg_result.leaf_index_count : 0;
 	}
 
 	return OK;

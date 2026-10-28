@@ -18,8 +18,8 @@ struct Cluster {
 	vec4 parent_sphere;
 	float self_error;
 	float parent_error;
-	uint index_offset;
-	uint index_count;
+	uint geometry_offset;
+	uint page_and_triangles; // (page << 8) | triangle_count.
 };
 
 layout(set = 0, binding = 0, std430) restrict readonly buffer Clusters {
@@ -27,12 +27,14 @@ layout(set = 0, binding = 0, std430) restrict readonly buffer Clusters {
 }
 clusters;
 
-struct DrawIndexedCommand {
-	uint index_count;
+// Non-indexed draw pulling its vertices from the cluster pages; first_vertex = cluster * 384 carries the cluster
+// (gl_VertexIndex always includes it, unlike first_instance which needs drawIndirectFirstInstance).
+struct DrawCommand {
+	uint vertex_count;
 	uint instance_count;
-	uint first_index;
-	int vertex_offset;
+	uint first_vertex;
 	uint first_instance;
+	uint pad;
 };
 
 // Commands [0, cluster_count): camera pass (LOD + frustum). [cluster_count, 2 * cluster_count): shadow and auxiliary passes (LOD only).
@@ -42,7 +44,7 @@ struct DrawIndexedCommand {
 // (cleared to zero before dispatch). Otherwise every cluster keeps its own slot and rejected ones get zero instances.
 layout(set = 0, binding = 1, std430) restrict buffer Commands {
 	uint counts[8];
-	DrawIndexedCommand data[];
+	DrawCommand data[];
 }
 commands;
 
@@ -329,12 +331,12 @@ void main() {
 	bool now_visible = visible && !is_occluded(to_view(c.cull_sphere.xyz), c.cull_sphere.w * scale);
 	bool drawn_early = visibility.data[index] != 0u && ((params.flags & FLAG_HIERARCHY) == 0u || work.data[5] == 0u);
 	if (now_visible && !drawn_early) {
-		DrawIndexedCommand late;
-		late.index_count = c.index_count;
+		DrawCommand late;
+		late.vertex_count = (c.page_and_triangles & 0xFFu) * 3u;
 		late.instance_count = 1u;
-		late.first_index = c.index_offset;
-		late.vertex_offset = 0;
+		late.first_vertex = index * 384u;
 		late.first_instance = 0u;
+		late.pad = 0u;
 		bool software = use_software(c, scale);
 		if (software) {
 			append_software(index, 1u, 11u);
@@ -344,10 +346,10 @@ void main() {
 		}
 		if ((params.flags & FLAG_STATS) != 0u) {
 			atomicAdd(stats.data[0], 1u);
-			atomicAdd(stats.data[1], c.index_count / 3u);
+			atomicAdd(stats.data[1], (c.page_and_triangles & 0xFFu));
 			if (software) {
 				atomicAdd(stats.data[4], 1u);
-				atomicAdd(stats.data[5], c.index_count / 3u);
+				atomicAdd(stats.data[5], (c.page_and_triangles & 0xFFu));
 			}
 		}
 	}
@@ -361,24 +363,24 @@ void main() {
 
 	bool software = visible && use_software(c, scale);
 
-	DrawIndexedCommand cmd;
-	cmd.index_count = c.index_count;
-	cmd.first_index = c.index_offset;
-	cmd.vertex_offset = 0;
+	DrawCommand cmd;
+	cmd.vertex_count = (c.page_and_triangles & 0xFFu) * 3u;
+	cmd.first_vertex = index * 384u;
 	cmd.first_instance = 0u;
+	cmd.pad = 0u;
 
 	if ((params.flags & FLAG_STATS) != 0u) {
 		if (visible) {
 			atomicAdd(stats.data[0], 1u);
-			atomicAdd(stats.data[1], c.index_count / 3u);
+			atomicAdd(stats.data[1], (c.page_and_triangles & 0xFFu));
 		}
 		if (software) {
 			atomicAdd(stats.data[4], 1u);
-			atomicAdd(stats.data[5], c.index_count / 3u);
+			atomicAdd(stats.data[5], (c.page_and_triangles & 0xFFu));
 		}
 		if (selected) {
 			atomicAdd(stats.data[2], 1u);
-			atomicAdd(stats.data[3], c.index_count / 3u);
+			atomicAdd(stats.data[3], (c.page_and_triangles & 0xFFu));
 		}
 	}
 

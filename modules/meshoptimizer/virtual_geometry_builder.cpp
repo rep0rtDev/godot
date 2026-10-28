@@ -48,6 +48,7 @@ struct WorkCluster {
 	float parent_error = FLT_MAX;
 	uint32_t level = 0;
 	int32_t part = -1; // Group this cluster was simplified into; -1 for roots.
+	int32_t source_part = -1; // Group that produced this cluster; -1 for leaves.
 };
 
 struct Builder {
@@ -59,7 +60,7 @@ struct Builder {
 	uint32_t part_count = 0;
 
 	// Splits a triangle list into clusters; every new cluster inherits the LOD sphere and error of the group that produced it.
-	void clusterize(const uint32_t *p_indices, uint32_t p_index_count, const float *p_lod_sphere, float p_lod_error, uint32_t p_level, LocalVector<uint32_t> &r_new_ids) {
+	void clusterize(const uint32_t *p_indices, uint32_t p_index_count, const float *p_lod_sphere, float p_lod_error, uint32_t p_level, int32_t p_source_part, LocalVector<uint32_t> &r_new_ids) {
 		const size_t max_meshlets = meshopt_buildMeshletsBound(p_index_count, VirtualGeometry::MAX_CLUSTER_VERTICES, VirtualGeometry::MAX_CLUSTER_TRIANGLES);
 		LocalVector<meshopt_Meshlet> meshlets;
 		meshlets.resize(max_meshlets);
@@ -74,6 +75,7 @@ struct Builder {
 			const meshopt_Meshlet &ml = meshlets[m];
 			WorkCluster c;
 			c.level = p_level;
+			c.source_part = p_source_part;
 			c.indices.resize(ml.triangle_count * 3);
 			for (uint32_t k = 0; k < ml.triangle_count * 3; k++) {
 				c.indices[k] = meshlet_vertices[ml.vertex_offset + meshlet_triangles[ml.triangle_offset + k]];
@@ -187,8 +189,8 @@ struct Builder {
 				c.parent_error = group_error;
 				c.part = part_count;
 			}
+			clusterize(simplified.ptr(), result, group_sphere, group_error, p_level, part_count, r_next_ids);
 			part_count++;
-			clusterize(simplified.ptr(), result, group_sphere, group_error, p_level, r_next_ids);
 		}
 		return !r_next_ids.is_empty();
 	}
@@ -350,7 +352,7 @@ bool virtual_geometry_build(const Vector3 *p_positions, const Vector3 *p_normals
 	meshopt_generatePositionRemap(b.position_remap.ptr(), b.positions.ptr(), p_vertex_count, sizeof(float) * 3);
 
 	LocalVector<uint32_t> level_ids;
-	b.clusterize(p_indices, p_index_count, nullptr, 0.0f, 0, level_ids);
+	b.clusterize(p_indices, p_index_count, nullptr, 0.0f, 0, -1, level_ids);
 	const uint32_t leaf_cluster_count = b.clusters.size();
 
 	uint32_t level = 1;
@@ -369,6 +371,9 @@ bool virtual_geometry_build(const Vector3 *p_positions, const Vector3 *p_normals
 	}
 	r_result.indices.resize(total_indices);
 	r_result.clusters.resize(b.clusters.size());
+	r_result.cluster_level.resize(b.clusters.size());
+	r_result.cluster_part.resize(b.clusters.size());
+	r_result.cluster_source_part.resize(b.clusters.size());
 	r_result.leaf_cluster_count = leaf_cluster_count;
 	r_result.leaf_index_count = 0;
 	r_result.level_count = level;
@@ -398,8 +403,12 @@ bool virtual_geometry_build(const Vector3 *p_positions, const Vector3 *p_normals
 		}
 		o.self_error = c.self_error;
 		o.parent_error = c.parent_error;
-		o.index_offset = offset;
-		o.index_count = c.indices.size();
+		// Index range in r_result.indices; pack() replaces it with the page location.
+		o.geometry_offset = offset;
+		o.page_and_triangles = c.indices.size() / 3;
+		r_result.cluster_level.write[new_index[i]] = c.level;
+		r_result.cluster_part.write[new_index[i]] = c.part;
+		r_result.cluster_source_part.write[new_index[i]] = c.source_part;
 		memcpy(iw + offset, c.indices.ptr(), sizeof(uint32_t) * c.indices.size());
 		offset += c.indices.size();
 		if (i < leaf_cluster_count) {

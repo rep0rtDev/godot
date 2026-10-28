@@ -8,8 +8,8 @@ struct VGCluster {
 	vec4 parent_sphere;
 	float self_error;
 	float parent_error;
-	uint index_offset;
-	uint index_count;
+	uint geometry_offset;
+	uint page_and_triangles;
 };
 
 layout(set = 4, binding = 0, std430) restrict readonly buffer VGVisibility {
@@ -29,50 +29,30 @@ layout(set = 4, binding = 2, std430) restrict readonly buffer VGClusters {
 }
 vg_clusters;
 
-layout(set = 4, binding = 3, std430) restrict readonly buffer VGIndices {
+layout(set = 4, binding = 3, std430) restrict readonly buffer VGPool {
 	uint data[];
 }
-vg_indices;
+vg_pool;
 
-layout(set = 4, binding = 4, std430) restrict readonly buffer VGVertices {
-	uint data[]; // Positions (float3), then the normal/tangent stream.
-}
-vg_vertices;
-
-layout(set = 4, binding = 5, std430) restrict readonly buffer VGAttributes {
+layout(set = 4, binding = 4, std430) restrict readonly buffer VGPages {
 	uint data[];
 }
-vg_attributes;
+vg_pages;
 
-#define VG_FLAG_INDEX_16 1u
-#define VG_FLAG_TANGENT 2u
-#define VG_FLAG_COLOR 4u
-#define VG_FLAG_UV 8u
-#define VG_FLAG_UV2 16u
-#define VG_FLAG_COMPRESSED 32u // ARRAY_FLAG_COMPRESS_ATTRIBUTES: unorm16 positions in the instance AABB, axis-angle tangents, unorm16 UVs.
+#define VG_POOL(w) vg_pool.data[w]
+#define VG_PAGE_BASE(p) vg_pages.data[p]
+#include "../effects/virtual_geometry_geometry_inc.glsl"
 
-layout(set = 4, binding = 6, std140) uniform VGSurface {
+layout(set = 4, binding = 5, std140) uniform VGSurface {
 	uvec2 size;
 	uint slot;
-	uint flags;
-	uint vertex_count;
-	uint normal_stride; // Bytes per vertex in the normal/tangent stream.
-	uint attrib_stride; // Bytes per vertex in the attribute buffer.
-	uint color_offset;
-	uint uv_offset;
-	uint uv2_offset;
+	uint pad;
 	float depth_bias;
-	uint normal_offset;
+	uint pad1;
+	uint pad2;
+	uint pad3;
 }
 vg_surface;
-
-uint vg_fetch_index(uint p_index) {
-	if ((vg_surface.flags & VG_FLAG_INDEX_16) != 0u) {
-		uint word = vg_indices.data[p_index >> 1u];
-		return (p_index & 1u) != 0u ? word >> 16u : word & 0xFFFFu;
-	}
-	return vg_indices.data[p_index];
-}
 
 // Fragment-stage copy of the vertex shader's axis_angle_to_tbn.
 void vg_axis_angle_to_tbn(vec3 axis, float angle, out vec3 tangent, out vec3 binormal, out vec3 normal) {
@@ -83,26 +63,6 @@ void vg_axis_angle_to_tbn(vec3 axis, float angle, out vec3 tangent, out vec3 bin
 	tangent = omc_axis.xxx * axis + vec3(c, -s_axis.z, s_axis.y);
 	binormal = omc_axis.yyy * axis + vec3(s_axis.z, c, -s_axis.x);
 	normal = omc_axis.zzz * axis + vec3(-s_axis.y, s_axis.x, c);
-}
-
-// r_angle: the compressed tangent angle (unorm), unused for uncompressed surfaces.
-vec3 vg_position(uint p_vertex, vec3 p_aabb_position, vec3 p_aabb_size, out float r_angle) {
-	if ((vg_surface.flags & VG_FLAG_COMPRESSED) != 0u) {
-		vec2 zw = unpackUnorm2x16(vg_vertices.data[p_vertex * 2u + 1u]);
-		r_angle = zw.y;
-		return vec3(unpackUnorm2x16(vg_vertices.data[p_vertex * 2u]), zw.x) * p_aabb_size + p_aabb_position;
-	}
-	r_angle = 0.0;
-	uint base = p_vertex * 3u;
-	return vec3(uintBitsToFloat(vg_vertices.data[base]), uintBitsToFloat(vg_vertices.data[base + 1u]), uintBitsToFloat(vg_vertices.data[base + 2u]));
-}
-
-vec2 vg_attribute_vec2(uint p_vertex, uint p_offset) {
-	uint word = (p_vertex * vg_surface.attrib_stride + p_offset) >> 2u;
-	if ((vg_surface.flags & VG_FLAG_COMPRESSED) != 0u) {
-		return unpackUnorm2x16(vg_attributes.data[word]);
-	}
-	return vec2(uintBitsToFloat(vg_attributes.data[word]), uintBitsToFloat(vg_attributes.data[word + 1u]));
 }
 
 float vg_cross2(vec2 a, vec2 b) {
@@ -165,9 +125,9 @@ uint vg_quad_setup() {
 // Rebuilds the interpolated vertex outputs of triangle p_triangle at this pixel (extrapolated if it lies outside).
 void vg_material_eval(in SceneData scene_data, uvec2 p_triangle) {
 	VGCluster cluster = vg_clusters.data[p_triangle.y];
-	uint first = cluster.index_offset + (p_triangle.x & 127u) * 3u;
-	uint ids[3] = uint[](vg_fetch_index(first), vg_fetch_index(first + 1u), vg_fetch_index(first + 2u));
-
+	VGGeometry geometry = vg_load_geometry(cluster.geometry_offset, cluster.page_and_triangles >> 8u);
+	uint corner = (p_triangle.x & 127u) * 3u;
+	uint ids[3] = uint[](vg_geometry_index(geometry, corner), vg_geometry_index(geometry, corner + 1u), vg_geometry_index(geometry, corner + 2u));
 	uint instance_index = draw_call.instance_index;
 	instance_index_interp = instance_index;
 
@@ -191,9 +151,8 @@ void vg_material_eval(in SceneData scene_data, uvec2 p_triangle) {
 	vec3 view_pos[3];
 	vec2 screen[3];
 	vec3 inv_w;
-	float angles[3];
 	for (int i = 0; i < 3; i++) {
-		view_pos[i] = (modelview * vec4(vg_position(ids[i], instances.data[instance_index].compressed_aabb_position_pad.xyz, instances.data[instance_index].compressed_aabb_size_pad.xyz, angles[i]), 1.0)).xyz;
+		view_pos[i] = (modelview * vec4(vg_geometry_position(geometry, ids[i]), 1.0)).xyz;
 		vec4 clip = projection_matrix * vec4(view_pos[i], 1.0);
 		inv_w[i] = 1.0 / clip.w;
 		screen[i] = clip.xy * inv_w[i];
@@ -214,25 +173,16 @@ void vg_material_eval(in SceneData scene_data, uvec2 p_triangle) {
 	vec3 tangent_sum = vec3(0.0);
 	vec3 binormal_sum = vec3(0.0);
 	for (int i = 0; i < 3; i++) {
-		uint word = (vg_surface.normal_offset + ids[i] * vg_surface.normal_stride) >> 2u;
-		vec3 n = oct_to_vec3(unpackUnorm2x16(vg_vertices.data[word]) * 2.0 - 1.0);
+		// The tangent frame is a rotation of the frame (x, y, z) by an axis and angle, like compressed attributes.
+		vec3 axis = oct_to_vec3(vg_geometry_axis(geometry, ids[i]) * 2.0 - 1.0);
+		float angle = vg_geometry_angle(geometry, ids[i]);
+		float binormal_sign = angle > 0.5 ? 1.0 : -1.0;
+		angle = abs(angle * 2.0 - 1.0) * M_PI;
+		vec3 n;
 		vec3 t;
 		vec3 bn;
-		if ((vg_surface.flags & VG_FLAG_COMPRESSED) != 0u) {
-			// Same encoding _unpack_vertex_attributes reads: the tangent frame is a rotation of the normal by an angle.
-			float angle = angles[i];
-			float binormal_sign = angle > 0.5 ? 1.0 : -1.0;
-			angle = abs(angle * 2.0 - 1.0) * M_PI;
-			vg_axis_angle_to_tbn(n, angle, t, bn, n);
-			bn *= binormal_sign;
-		} else if ((vg_surface.flags & VG_FLAG_TANGENT) != 0u) {
-			vec2 signed_tangent = unpackUnorm2x16(vg_vertices.data[word + 1u]) * 2.0 - 1.0;
-			t = oct_to_vec3(vec2(signed_tangent.x, abs(signed_tangent.y) * 2.0 - 1.0));
-			bn = normalize(cross(n, t) * sign(signed_tangent.y));
-		} else {
-			t = normalize(cross(n, abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
-			bn = cross(n, t);
-		}
+		vg_axis_angle_to_tbn(axis, angle, t, bn, n);
+		bn *= binormal_sign;
 		normal_sum += normalize(modelview_normal * n) * b[i];
 		tangent_sum += normalize(mat3(modelview) * t) * b[i];
 		binormal_sum += normalize(mat3(modelview) * bn) * b[i];
@@ -246,32 +196,22 @@ void vg_material_eval(in SceneData scene_data, uvec2 p_triangle) {
 #endif
 #endif
 
-	vec4 uv_scale = instances.data[instance_index].uv_scale;
 #ifdef UV_USED
 	uv_interp = vec2(0.0);
-	if ((vg_surface.flags & VG_FLAG_UV) != 0u) {
-		uv_interp = vg_attribute_vec2(ids[0], vg_surface.uv_offset) * b.x + vg_attribute_vec2(ids[1], vg_surface.uv_offset) * b.y + vg_attribute_vec2(ids[2], vg_surface.uv_offset) * b.z;
-		if (uv_scale != vec4(0.0)) {
-			uv_interp = (uv_interp - 0.5) * uv_scale.xy;
-		}
+	if ((geometry.flags & VG_GEOMETRY_FLAG_UV) != 0u) {
+		uv_interp = vg_geometry_uv(geometry, ids[0]) * b.x + vg_geometry_uv(geometry, ids[1]) * b.y + vg_geometry_uv(geometry, ids[2]) * b.z;
 	}
 #endif
 #if defined(UV2_USED) || defined(USE_LIGHTMAP)
 	uv2_interp = vec2(0.0);
-	if ((vg_surface.flags & VG_FLAG_UV2) != 0u) {
-		uv2_interp = vg_attribute_vec2(ids[0], vg_surface.uv2_offset) * b.x + vg_attribute_vec2(ids[1], vg_surface.uv2_offset) * b.y + vg_attribute_vec2(ids[2], vg_surface.uv2_offset) * b.z;
-		if (uv_scale != vec4(0.0)) {
-			uv2_interp = (uv2_interp - 0.5) * uv_scale.zw;
-		}
+	if ((geometry.flags & VG_GEOMETRY_FLAG_UV2) != 0u) {
+		uv2_interp = vg_geometry_uv2(geometry, ids[0]) * b.x + vg_geometry_uv2(geometry, ids[1]) * b.y + vg_geometry_uv2(geometry, ids[2]) * b.z;
 	}
 #endif
 #if defined(COLOR_USED)
 	color_interp = vec4(1.0);
-	if ((vg_surface.flags & VG_FLAG_COLOR) != 0u) {
-		color_interp = vec4(0.0);
-		for (int i = 0; i < 3; i++) {
-			color_interp += unpackUnorm4x8(vg_attributes.data[(ids[i] * vg_surface.attrib_stride + vg_surface.color_offset) >> 2u]) * b[i];
-		}
+	if ((geometry.flags & VG_GEOMETRY_FLAG_COLOR) != 0u) {
+		color_interp = vg_geometry_color(geometry, ids[0]) * b.x + vg_geometry_color(geometry, ids[1]) * b.y + vg_geometry_color(geometry, ids[2]) * b.z;
 	}
 #endif
 }

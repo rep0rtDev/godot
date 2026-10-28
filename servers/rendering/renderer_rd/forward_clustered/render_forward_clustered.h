@@ -578,6 +578,7 @@ private:
 		// Compute rasterization of small clusters: reads this surface's positions and indices.
 		RID vg_raster_uniform_set;
 		uint32_t vg_raster_flags = 0;
+		RID vg_pull_uniform_set; // Set 4 of the hardware raster: clusters, pages and the surface params.
 		// Material pass straight from the visibility buffer (uniform set 4) and its per-surface parameters.
 		RID vg_material_uniform_set;
 		RID vg_material_params;

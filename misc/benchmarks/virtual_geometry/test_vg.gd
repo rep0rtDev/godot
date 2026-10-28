@@ -11,7 +11,7 @@ func make_sphere(rings: int, segs: int) -> Array:
 	var a := arrays.get_mesh_arrays()
 	return a
 
-const HEADER := 16
+const HEADER := 32
 
 func cluster_at(buf: PackedByteArray, i: int) -> Dictionary:
 	var o := HEADER + i * 64
@@ -21,9 +21,30 @@ func cluster_at(buf: PackedByteArray, i: int) -> Dictionary:
 		"parent": Vector4(buf.decode_float(o + 32), buf.decode_float(o + 36), buf.decode_float(o + 40), buf.decode_float(o + 44)),
 		"self_error": buf.decode_float(o + 48),
 		"parent_error": buf.decode_float(o + 52),
-		"offset": buf.decode_u32(o + 56),
-		"count": buf.decode_u32(o + 60),
+		"geometry": buf.decode_u32(o + 56),
+		"page": buf.decode_u32(o + 60) >> 8,
+		"count": (buf.decode_u32(o + 60) & 0xFF) * 3,
 	}
+
+# Decodes one cluster of the page data: positions (unorm16 in the cluster AABB) and 8-bit indices.
+func decode_cluster(page_data: PackedByteArray, geometry_offset: int) -> Dictionary:
+	var o := geometry_offset
+	var vertex_count := page_data.decode_u32(o)
+	var triangle_count := page_data.decode_u32(o + 4)
+	var stride := page_data.decode_u32(o + 8)
+	var aabb_min := Vector3(page_data.decode_float(o + 16), page_data.decode_float(o + 20), page_data.decode_float(o + 24))
+	var index_offset := page_data.decode_u32(o + 28)
+	var aabb_size := Vector3(page_data.decode_float(o + 32), page_data.decode_float(o + 36), page_data.decode_float(o + 40))
+	var positions := PackedVector3Array()
+	positions.resize(vertex_count)
+	for v in vertex_count:
+		var r := o + 80 + v * stride
+		positions[v] = aabb_min + aabb_size * Vector3(page_data.decode_u16(r), page_data.decode_u16(r + 2), page_data.decode_u16(r + 4)) / 65535.0
+	var indices := PackedInt32Array()
+	indices.resize(triangle_count * 3)
+	for k in triangle_count * 3:
+		indices[k] = page_data.decode_u8(o + index_offset + k)
+	return {"positions": positions, "indices": indices, "stride": stride, "flags": page_data.decode_u32(o + 12)}
 
 func node_at(buf: PackedByteArray, cluster_count: int, i: int) -> Dictionary:
 	var o := HEADER + cluster_count * 64 + i * 64
@@ -58,25 +79,81 @@ func _init() -> void:
 		return
 	var buf: PackedByteArray = sd["vg_clusters"]
 	var leaf_count: int = sd["vg_leaf_index_count"]
-	if buf.decode_u32(0) != 0x32444756:
+	if buf.decode_u32(0) != 0x33444756:
 		print("FAIL: bad vg data magic")
 		quit(1)
 		return
 	var n := buf.decode_u32(4)
 	var node_count := buf.decode_u32(8)
-	if buf.size() != HEADER + (n + node_count) * 64:
+	var page_count := buf.decode_u32(12)
+	var dependency_count := buf.decode_u32(16)
+	var data_size := buf.decode_u32(20)
+	var page_table := HEADER + (n + node_count) * 64
+	var page_data_offset := page_table + page_count * 16 + dependency_count * 4
+	if buf.size() != page_data_offset + data_size:
 		print("FAIL: vg data size mismatch")
 		quit(1)
 		return
+	var page_data := buf.slice(page_data_offset)
 	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	var idx := PackedInt32Array()
-	var ib: PackedByteArray = sd["index_data"]
-	var wide: bool = sd["vertex_count"] > 65536
-	var total_idx: int = sd["index_count"]
-	idx.resize(total_idx)
-	for i in total_idx:
-		idx[i] = ib.decode_u32(i * 4) if wide else ib.decode_u16(i * 2)
-	print("source tris=%d clusters=%d leaf_tris=%d total_tris=%d build_ms=%.1f" % [src_tris, n, leaf_count / 3, total_idx / 3, build_ms])
+	var total_idx := 0
+	for i in n:
+		total_idx += (buf.decode_u32(HEADER + i * 64 + 60) & 0xFF) * 3
+	print("source tris=%d clusters=%d leaf_tris=%d total_tris=%d pages=%d data_kb=%d build_ms=%.1f" % [src_tris, n, leaf_count / 3, total_idx / 3, page_count, data_size / 1024, build_ms])
+	# Pages: root page within 32 KB, others within 128 KB, contiguous, dependencies point at earlier pages.
+	var expect_offset := 0
+	for pg in page_count:
+		var po := page_table + pg * 16
+		var p_offset := buf.decode_u32(po)
+		var p_size := buf.decode_u32(po + 4)
+		var dep_first := buf.decode_u32(po + 8)
+		var dep_count := buf.decode_u32(po + 12)
+		if p_offset != expect_offset or p_size == 0 or p_size > (32 * 1024 if pg == 0 else 128 * 1024):
+			print("FAIL: bad page %d offset %d size %d" % [pg, p_offset, p_size]); failures += 1
+		expect_offset += p_size
+		for d in dep_count:
+			var dep := buf.decode_u32(page_table + page_count * 16 + (dep_first + d) * 4)
+			if dep >= pg:
+				print("FAIL: page %d depends on later page %d" % [pg, dep]); failures += 1
+	if expect_offset != data_size:
+		print("FAIL: pages do not cover the page data"); failures += 1
+	# Decoded cluster geometry: every quantized vertex snaps to a source vertex, so cuts can be checked by position.
+	var grid := {}
+	for v in verts.size():
+		var cell := str((verts[v] * 1000.0).round())
+		if not grid.has(cell):
+			grid[cell] = []
+		grid[cell].append(v)
+	var decoded := []
+	var max_err := 0.0
+	for i in n:
+		var c := decode_cluster(page_data, buf.decode_u32(HEADER + i * 64 + 56))
+		var snapped := PackedVector3Array()
+		snapped.resize(c["positions"].size())
+		for v in c["positions"].size():
+			var p: Vector3 = c["positions"][v]
+			var best := -1
+			var best_d := 1e30
+			var center := (p * 1000.0).round()
+			for dz in [-1, 0, 1]:
+				for dy in [-1, 0, 1]:
+					for dx in [-1, 0, 1]:
+						for cand in grid.get(str(center + Vector3(dx, dy, dz)), []):
+							var d := p.distance_squared_to(verts[cand])
+							if d < best_d:
+								best_d = d
+								best = cand
+			if best < 0:
+				print("FAIL: cluster %d vertex %d far from every source vertex" % [i, v]); failures += 1
+				snapped[v] = p
+			else:
+				max_err = max(max_err, sqrt(best_d))
+				snapped[v] = verts[best]
+		c["positions"] = snapped
+		decoded.append(c)
+	print("max quantization error=%f" % max_err)
+	if max_err > 1e-4:
+		print("FAIL: quantization error too large"); failures += 1
 	if leaf_count / 3 != src_tris:
 		print("FAIL: leaf triangle count mismatch"); failures += 1
 	var surf_arrays := mesh.surface_get_arrays(0)
@@ -173,10 +250,13 @@ func _init() -> void:
 			if fine_enough(c["self"], c["self_error"], cam, lod_scale) and not fine_enough(c["parent"], c["parent_error"], cam, lod_scale):
 				hier_selected += 1
 				tris += c["count"] / 3
-				for t in range(c["offset"], c["offset"] + c["count"], 3):
+				var geom: Dictionary = decoded[ci]
+				var gp: PackedVector3Array = geom["positions"]
+				var gi: PackedInt32Array = geom["indices"]
+				for t in range(0, gi.size(), 3):
 					for e in 3:
-						var a: Vector3 = verts[idx[t + e]]
-						var b: Vector3 = verts[idx[t + (e + 1) % 3]]
+						var a: Vector3 = gp[gi[t + e]]
+						var b: Vector3 = gp[gi[t + (e + 1) % 3]]
 						if a == b:
 							continue
 						var key = [a, b] if str(a) < str(b) else [b, a]

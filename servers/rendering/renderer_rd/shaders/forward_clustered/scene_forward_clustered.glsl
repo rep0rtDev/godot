@@ -20,7 +20,7 @@
 /* INPUT ATTRIBS */
 
 // Always contains vertex position in XYZ, can contain tangent angle in W.
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 vertex_angle_attrib;
 #else
 layout(location = 0) in vec4 vertex_angle_attrib;
@@ -30,7 +30,7 @@ layout(location = 0) in vec4 vertex_angle_attrib;
 
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
 // Contains Normal/Axis in RG, can contain tangent in BA.
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 axis_tangent_attrib;
 #else
 layout(location = 1) in vec4 axis_tangent_attrib;
@@ -40,7 +40,7 @@ layout(location = 1) in vec4 axis_tangent_attrib;
 // Location 2 is unused.
 
 #if defined(COLOR_USED)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 color_attrib;
 #else
 layout(location = 3) in vec4 color_attrib;
@@ -48,7 +48,7 @@ layout(location = 3) in vec4 color_attrib;
 #endif
 
 #ifdef UV_USED
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec2 uv_attrib;
 #else
 layout(location = 4) in vec2 uv_attrib;
@@ -56,7 +56,7 @@ layout(location = 4) in vec2 uv_attrib;
 #endif
 
 #if defined(UV2_USED) || defined(USE_LIGHTMAP) || defined(MODE_RENDER_MATERIAL)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec2 uv2_attrib;
 #else
 layout(location = 5) in vec2 uv2_attrib;
@@ -64,7 +64,7 @@ layout(location = 5) in vec2 uv2_attrib;
 #endif
 
 #if defined(CUSTOM0_USED)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 custom0_attrib;
 #else
 layout(location = 6) in vec4 custom0_attrib;
@@ -72,7 +72,7 @@ layout(location = 6) in vec4 custom0_attrib;
 #endif
 
 #if defined(CUSTOM1_USED)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 custom1_attrib;
 #else
 layout(location = 7) in vec4 custom1_attrib;
@@ -80,7 +80,7 @@ layout(location = 7) in vec4 custom1_attrib;
 #endif
 
 #if defined(CUSTOM2_USED)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 custom2_attrib;
 #else
 layout(location = 8) in vec4 custom2_attrib;
@@ -88,7 +88,7 @@ layout(location = 8) in vec4 custom2_attrib;
 #endif
 
 #if defined(CUSTOM3_USED)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 custom3_attrib;
 #else
 layout(location = 9) in vec4 custom3_attrib;
@@ -96,7 +96,7 @@ layout(location = 9) in vec4 custom3_attrib;
 #endif
 
 #if defined(BONES_USED) || defined(USE_PARTICLE_TRAILS)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 uvec4 bone_attrib;
 #else
 layout(location = 10) in uvec4 bone_attrib;
@@ -104,7 +104,7 @@ layout(location = 10) in uvec4 bone_attrib;
 #endif
 
 #if defined(WEIGHTS_USED) || defined(USE_PARTICLE_TRAILS)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 weight_attrib;
 #else
 layout(location = 11) in vec4 weight_attrib;
@@ -112,14 +112,14 @@ layout(location = 11) in vec4 weight_attrib;
 #endif
 
 #ifdef MOTION_VECTORS
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 previous_vertex_attrib;
 #else
 layout(location = 12) in vec4 previous_vertex_attrib;
 #endif
 
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
-#ifdef MODE_VG_MATERIAL
+#if defined(MODE_VG_MATERIAL) || defined(MODE_VG_PULL)
 vec4 previous_normal_attrib;
 #else
 layout(location = 13) in vec4 previous_normal_attrib;
@@ -415,7 +415,11 @@ void vertex_shader(vec3 vertex_input,
 	uv2_interp = uv2_attrib;
 #endif
 
+#ifdef MODE_VG_PULL
+	vec4 uv_scale = vec4(0.0); // Pulled UVs are already decoded.
+#else
 	vec4 uv_scale = instances.data[instance_index].uv_scale;
+#endif
 
 	if (uv_scale != vec4(0.0)) { // Compression enabled
 #ifdef UV_USED
@@ -838,6 +842,46 @@ void main() {
 	gl_Position = vec4(pixel * scene_data_block.data.screen_pixel_size * 2.0 - 1.0, 0.0, 1.0);
 }
 #else
+
+#ifdef MODE_VG_PULL
+// Virtual geometry hardware raster: one non-indexed draw per cluster, first_vertex = cluster * 384. Vertices are
+// decoded from the cluster pages and fed to the regular vertex path as compressed-format attributes.
+struct VGCluster {
+	vec4 cull_sphere;
+	vec4 self_sphere;
+	vec4 parent_sphere;
+	float self_error;
+	float parent_error;
+	uint geometry_offset;
+	uint page_and_triangles;
+};
+
+layout(set = 4, binding = 2, std430) restrict readonly buffer VGClusters {
+	VGCluster data[];
+}
+vg_clusters;
+
+layout(set = 4, binding = 3, std430) restrict readonly buffer VGPool {
+	uint data[];
+}
+vg_pool;
+
+layout(set = 4, binding = 4, std430) restrict readonly buffer VGPages {
+	uint data[];
+}
+vg_pages;
+
+#define VG_POOL(w) vg_pool.data[w]
+#define VG_PAGE_BASE(p) vg_pages.data[p]
+#include "../effects/virtual_geometry_geometry_inc.glsl"
+
+#define COMPRESSED_AABB_POSITION vec3(0.0)
+#define COMPRESSED_AABB_SIZE vec3(1.0)
+#else
+#define COMPRESSED_AABB_POSITION instances.data[instance_index].compressed_aabb_position_pad.xyz
+#define COMPRESSED_AABB_SIZE instances.data[instance_index].compressed_aabb_size_pad.xyz
+#endif
+
 void main() {
 	uint instance_index = draw_call.instance_index;
 	if (!sc_multimesh()) {
@@ -845,6 +889,32 @@ void main() {
 	}
 
 	instance_index_interp = instance_index;
+#ifdef MODE_VG_PULL
+	{
+		VGCluster cluster = vg_clusters.data[uint(gl_VertexIndex) / 384u];
+		VGGeometry geometry = vg_load_geometry(cluster.geometry_offset, cluster.page_and_triangles >> 8u);
+		uint v = vg_geometry_index(geometry, uint(gl_VertexIndex) % 384u);
+		vertex_angle_attrib = vec4(vg_geometry_position(geometry, v), vg_geometry_angle(geometry, v));
+#if defined(NORMAL_USED) || defined(TANGENT_USED)
+		axis_tangent_attrib = vec4(vg_geometry_axis(geometry, v), 0.0, 1.0);
+#endif
+#if defined(COLOR_USED)
+		color_attrib = (geometry.flags & VG_GEOMETRY_FLAG_COLOR) != 0u ? vg_geometry_color(geometry, v) : vec4(1.0);
+#endif
+#ifdef UV_USED
+		uv_attrib = (geometry.flags & VG_GEOMETRY_FLAG_UV) != 0u ? vg_geometry_uv(geometry, v) : vec2(0.0);
+#endif
+#if defined(UV2_USED) || defined(USE_LIGHTMAP) || defined(MODE_RENDER_MATERIAL)
+		uv2_attrib = (geometry.flags & VG_GEOMETRY_FLAG_UV2) != 0u ? vg_geometry_uv2(geometry, v) : vec2(0.0);
+#endif
+#ifdef MOTION_VECTORS
+		previous_vertex_attrib = vertex_angle_attrib;
+#if defined(NORMAL_USED) || defined(TANGENT_USED)
+		previous_normal_attrib = axis_tangent_attrib;
+#endif
+#endif
+	}
+#endif
 
 #ifdef MOTION_VECTORS
 	// Previous vertex.
@@ -859,8 +929,8 @@ void main() {
 
 	_unpack_vertex_attributes(
 			previous_vertex_attrib,
-			instances.data[instance_index].compressed_aabb_position_pad.xyz,
-			instances.data[instance_index].compressed_aabb_size_pad.xyz,
+			COMPRESSED_AABB_POSITION,
+			COMPRESSED_AABB_SIZE,
 
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
 			previous_normal_attrib,
@@ -902,8 +972,8 @@ void main() {
 
 	_unpack_vertex_attributes(
 			vertex_angle_attrib,
-			instances.data[instance_index].compressed_aabb_position_pad.xyz,
-			instances.data[instance_index].compressed_aabb_size_pad.xyz,
+			COMPRESSED_AABB_POSITION,
+			COMPRESSED_AABB_SIZE,
 #if defined(NORMAL_USED) || defined(TANGENT_USED)
 			axis_tangent_attrib,
 #ifdef NORMAL_USED

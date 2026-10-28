@@ -230,14 +230,16 @@ RID VirtualGeometryEffect::create_command_buffer(const Vector<uint8_t> &p_cluste
 	uint32_t *w = reinterpret_cast<uint32_t *>(data.ptrw() + HEADER_SIZE);
 	uint32_t leaf_clusters = 0;
 	for (uint32_t i = 0; i < cluster_count; i++) {
-		if (clusters[i].index_offset >= p_leaf_index_count) {
-			continue;
+		if (clusters[i].self_error != 0.0f) {
+			continue; // Only the finest clusters have no simplification error.
 		}
 		for (uint32_t range = 0; range < 2; range++) {
+			// Non-indexed draw pulling its vertices: [vertex_count, instance_count, first_vertex = cluster * 384, first_instance].
 			uint32_t *cmd = w + (range * cluster_count + leaf_clusters) * 5;
-			cmd[0] = clusters[i].index_count;
+			cmd[0] = (clusters[i].page_and_triangles & 0xFF) * 3;
 			cmd[1] = 1;
-			cmd[2] = clusters[i].index_offset;
+			cmd[2] = i * 384;
+			cmd[3] = 0;
 		}
 		leaf_clusters++;
 	}
@@ -343,10 +345,10 @@ void VirtualGeometryEffect::begin_software_raster(const Size2i &p_size, uint32_t
 	}
 }
 
-RID VirtualGeometryEffect::create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_vertex_buffer, RID p_index_buffer) const {
+RID VirtualGeometryEffect::create_raster_uniform_set(RID p_cluster_buffer, RID p_work_buffer, RID p_page_buffer, RID p_page_table_buffer) const {
 	ERR_FAIL_COND_V(!supports_software_raster, RID());
 	Vector<RD::Uniform> uniforms;
-	const RID buffers[4] = { p_cluster_buffer, p_work_buffer, p_vertex_buffer, p_index_buffer };
+	const RID buffers[4] = { p_cluster_buffer, p_work_buffer, p_page_buffer, p_page_table_buffer };
 	for (uint32_t i = 0; i < 4; i++) {
 		RD::Uniform u(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, buffers[i]);
 		uniforms.push_back(u);

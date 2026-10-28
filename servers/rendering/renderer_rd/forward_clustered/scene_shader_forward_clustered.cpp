@@ -275,7 +275,12 @@ Pair<ShaderRD *, RID> SceneShaderForwardClustered::ShaderData::get_native_shader
 	}
 }
 
-uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const {
+uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_vg_pull) const {
+	const uint16_t base = _get_base_shader_version(p_pipeline_version, p_color_pass_flags, p_ubershader);
+	return (p_vg_pull && p_pipeline_version != PIPELINE_VERSION_VG_MATERIAL) ? base + ShaderVersion::SHADER_VERSION_VG_PULL_BASE : base;
+}
+
+uint16_t SceneShaderForwardClustered::ShaderData::_get_base_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const {
 	uint32_t ubershader_base = p_ubershader ? ShaderVersion::SHADER_VERSION_COLOR_PASS : 0;
 	switch (p_pipeline_version) {
 		case PIPELINE_VERSION_DEPTH_PASS:
@@ -513,7 +518,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 		blend_state = blend_state_color_opaque;
 	}
 
-	RID shader_rid = get_shader_variant(p_pipeline_key.version, p_pipeline_key.color_pass_flags, p_pipeline_key.ubershader);
+	RID shader_rid = get_shader_variant(p_pipeline_key.version, p_pipeline_key.color_pass_flags, p_pipeline_key.ubershader, p_pipeline_key.vg_pull);
 	ERR_FAIL_COND(shader_rid.is_null());
 
 	RID pipeline = RD::get_singleton()->render_pipeline_create(shader_rid, p_pipeline_key.framebuffer_format_id, p_pipeline_key.vertex_format_id, primitive_rd, raster_state, multisample_state, depth_stencil_state, blend_state, 0, 0, specialization_constants);
@@ -547,8 +552,8 @@ void SceneShaderForwardClustered::ShaderData::_clear_vertex_input_mask_cache() {
 	}
 }
 
-RID SceneShaderForwardClustered::ShaderData::get_shader_variant(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const {
-	return _get_shader_variant(_get_shader_version(p_pipeline_version, p_color_pass_flags, p_ubershader));
+RID SceneShaderForwardClustered::ShaderData::get_shader_variant(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader, bool p_vg_pull) const {
+	return _get_shader_variant(_get_shader_version(p_pipeline_version, p_color_pass_flags, p_ubershader, p_vg_pull));
 }
 
 uint64_t SceneShaderForwardClustered::ShaderData::get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) {
@@ -705,8 +710,13 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		}
 
 		// SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ubershader.
+		const int base_variant_count = shader_versions.size();
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VG, "\n#define MODE_VG_MATERIAL\n", false));
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VG, "\n#define UBERSHADER\n#define MODE_VG_MATERIAL\n", false));
+		// SHADER_VERSION_VG_PULL_BASE + i: vertex pulling twin of base variant i.
+		for (int i = 0; i < base_variant_count; i++) {
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VG, String::utf8(shader_versions[i].text) + "\n#define MODE_VG_PULL\n", false));
+		}
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));

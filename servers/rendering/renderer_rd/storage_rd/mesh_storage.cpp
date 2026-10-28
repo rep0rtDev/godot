@@ -423,22 +423,25 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 		s->index_buffer = RD::get_singleton()->index_buffer_create(new_surface.index_count, is_index_16 ? RD::INDEX_BUFFER_FORMAT_UINT16 : RD::INDEX_BUFFER_FORMAT_UINT32, new_surface.index_data, false, requested_storage_flag);
 		s->index_buffer_size = new_surface.index_data.size();
 		s->index_count = new_surface.index_count;
-		uint32_t vg_cluster_count = 0;
-		uint32_t vg_node_count = 0;
-		if (VirtualGeometry::unpack_header(new_surface.vg_cluster_data, vg_cluster_count, vg_node_count) && new_surface.vg_leaf_index_count > 0 && new_surface.vg_leaf_index_count <= new_surface.index_count) {
+		VirtualGeometryHeader vg_header;
+		if (VirtualGeometry::unpack_header(new_surface.vg_cluster_data, vg_header)) {
 			s->vg_cluster_data = new_surface.vg_cluster_data;
-			s->vg_cluster_count = vg_cluster_count;
-			s->vg_node_count = vg_node_count;
+			s->vg_cluster_count = vg_header.cluster_count;
+			s->vg_node_count = vg_header.node_count;
 			s->vg_leaf_index_count = new_surface.vg_leaf_index_count;
 			const uint32_t cluster_offset = VirtualGeometry::get_cluster_data_offset();
-			const uint32_t node_offset = VirtualGeometry::get_node_data_offset(vg_cluster_count);
+			const uint32_t node_offset = VirtualGeometry::get_node_data_offset(vg_header.cluster_count);
+			const uint32_t page_table_offset = VirtualGeometry::get_page_table_offset(vg_header);
+			const uint32_t page_data_offset = VirtualGeometry::get_page_data_offset(vg_header);
 			s->vg_cluster_buffer = RD::get_singleton()->storage_buffer_create(node_offset - cluster_offset, new_surface.vg_cluster_data.slice(cluster_offset, node_offset));
-			s->vg_node_buffer = RD::get_singleton()->storage_buffer_create(new_surface.vg_cluster_data.size() - node_offset, new_surface.vg_cluster_data.slice(node_offset));
-			s->vg_index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
-			s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->vg_leaf_index_count);
-		} else {
-			s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
+			s->vg_node_buffer = RD::get_singleton()->storage_buffer_create(page_table_offset - node_offset, new_surface.vg_cluster_data.slice(node_offset, page_table_offset));
+			// Every page resident, in file order: a cluster's geometry offset addresses the buffer directly.
+			s->vg_page_buffer = RD::get_singleton()->storage_buffer_create(vg_header.data_size, new_surface.vg_cluster_data.slice(page_data_offset));
+			Vector<uint8_t> page_table;
+			page_table.resize_initialized(vg_header.page_count * sizeof(uint32_t));
+			s->vg_page_table_buffer = RD::get_singleton()->storage_buffer_create(page_table.size(), page_table);
 		}
+		s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
 		if (new_surface.lods.size()) {
 			s->lods = memnew_arr(Mesh::Surface::LOD, new_surface.lods.size());
 			s->lod_count = new_surface.lods.size();
@@ -555,6 +558,12 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 	}
 	if (s.vg_cluster_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.vg_cluster_buffer);
+	}
+	if (s.vg_page_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(s.vg_page_buffer);
+	}
+	if (s.vg_page_table_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(s.vg_page_table_buffer);
 	}
 	if (s.index_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.index_buffer);

@@ -20,8 +20,8 @@ struct Cluster {
 	vec4 parent_sphere;
 	float self_error;
 	float parent_error;
-	uint index_offset;
-	uint index_count;
+	uint geometry_offset;
+	uint page_and_triangles;
 };
 
 layout(set = 0, binding = 0, std430) restrict readonly buffer Clusters {
@@ -34,15 +34,19 @@ layout(set = 0, binding = 1, std430) restrict readonly buffer Work {
 }
 work;
 
-layout(set = 0, binding = 2, std430) restrict readonly buffer Positions {
-	uint data[]; // float3 per vertex, or unorm16 x4 (xyz in the surface AABB, w tangent angle) when FLAG_COMPRESSED.
-}
-positions;
-
-layout(set = 0, binding = 3, std430) restrict readonly buffer Indices {
+layout(set = 0, binding = 2, std430) restrict readonly buffer Pool {
 	uint data[];
 }
-indices;
+pool;
+
+layout(set = 0, binding = 3, std430) restrict readonly buffer Pages {
+	uint data[];
+}
+pages;
+
+#define VG_POOL(w) pool.data[w]
+#define VG_PAGE_BASE(p) pages.data[p]
+#include "virtual_geometry_geometry_inc.glsl"
 
 layout(set = 1, binding = 0, std430) restrict buffer VisibilityBuffer {
 	uint64_t data[];
@@ -56,10 +60,8 @@ layout(set = 1, binding = 1, std430) restrict buffer Entries {
 }
 entries;
 
-#define FLAG_INDEX_16 1u
 #define FLAG_CULL_POSITIVE 2u
 #define FLAG_CULL_NEGATIVE 4u
-#define FLAG_COMPRESSED 8u
 
 layout(push_constant, std430) uniform Params {
 	mat4 model_view_projection;
@@ -70,8 +72,6 @@ layout(push_constant, std430) uniform Params {
 	uint entry_capacity;
 	uint pad0;
 	uint pad1;
-	vec4 aabb_position; // Dequantization of FLAG_COMPRESSED positions.
-	vec4 aabb_size;
 }
 params;
 
@@ -79,24 +79,8 @@ params;
 
 shared uint entry;
 
-uint fetch_index(uint p_index) {
-	if ((params.flags & FLAG_INDEX_16) != 0u) {
-		uint word = indices.data[p_index >> 1u];
-		return (p_index & 1u) != 0u ? word >> 16u : word & 0xFFFFu;
-	}
-	return indices.data[p_index];
-}
-
-vec3 position(uint p_vertex) {
-	if ((params.flags & FLAG_COMPRESSED) != 0u) {
-		vec3 unorm = vec3(unpackUnorm2x16(positions.data[p_vertex * 2u]), unpackUnorm2x16(positions.data[p_vertex * 2u + 1u]).x);
-		return unorm * params.aabb_size.xyz + params.aabb_position.xyz;
-	}
-	return vec3(uintBitsToFloat(positions.data[p_vertex * 3u]), uintBitsToFloat(positions.data[p_vertex * 3u + 1u]), uintBitsToFloat(positions.data[p_vertex * 3u + 2u]));
-}
-
-vec3 project(uint p_vertex) {
-	vec4 clip = params.model_view_projection * vec4(position(p_vertex), 1.0);
+vec3 project(vec3 p_position) {
+	vec4 clip = params.model_view_projection * vec4(p_position, 1.0);
 	vec3 ndc = clip.xyz / clip.w;
 	return vec3((ndc.xy * 0.5 + 0.5) * vec2(params.size), ndc.z);
 }
@@ -117,14 +101,14 @@ void main() {
 	barrier();
 
 	uint tri = gl_LocalInvocationIndex;
-	if (tri * 3u >= c.index_count || entry >= min(params.entry_capacity, MAX_ENTRIES)) {
+	if (tri >= (c.page_and_triangles & 0xFFu) || entry >= min(params.entry_capacity, MAX_ENTRIES)) {
 		return;
 	}
 
-	uint first = c.index_offset + tri * 3u;
-	vec3 a = project(fetch_index(first));
-	vec3 b = project(fetch_index(first + 1u));
-	vec3 v2 = project(fetch_index(first + 2u));
+	VGGeometry g = vg_load_geometry(c.geometry_offset, c.page_and_triangles >> 8u);
+	vec3 a = project(vg_geometry_position(g, vg_geometry_index(g, tri * 3u)));
+	vec3 b = project(vg_geometry_position(g, vg_geometry_index(g, tri * 3u + 1u)));
+	vec3 v2 = project(vg_geometry_position(g, vg_geometry_index(g, tri * 3u + 2u)));
 
 	float area = edge(a.xy, b.xy, v2.xy);
 	if (area == 0.0 || (params.flags & (area > 0.0 ? FLAG_CULL_POSITIVE : FLAG_CULL_NEGATIVE)) != 0u) {

@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "core/math/color.h"
+#include "core/math/vector2.h"
 #include "core/math/vector3.h"
 #include "core/templates/vector.h"
 
@@ -41,11 +43,41 @@ struct VirtualGeometryCluster {
 	float parent_sphere[4]; // LOD bounds of the group this cluster was simplified into.
 	float self_error; // Object-space error of this cluster relative to the source mesh.
 	float parent_error; // Error of the coarser representation; FLT_MAX for roots.
-	uint32_t index_offset;
-	uint32_t index_count;
+	uint32_t geometry_offset; // Byte offset of this cluster's VirtualGeometryClusterGeometry inside the page data.
+	uint32_t page_and_triangles; // (page << 8) | triangle_count.
 };
 
 static_assert(sizeof(VirtualGeometryCluster) == 64);
+
+// Per-cluster geometry inside a page, followed by the vertex records and the 8-bit triangle indices.
+// Vertex record: position unorm16 x3 in the cluster AABB, normal (or TBN rotation axis when FLAG_TANGENT)
+// octahedral unorm16 x2, TBN angle unorm16 (12 bytes), then optional uv unorm16 x2 in the cluster UV range,
+// uv2 likewise and color rgba8.
+struct VirtualGeometryClusterGeometry {
+	uint32_t vertex_count;
+	uint32_t triangle_count;
+	uint32_t vertex_stride;
+	uint32_t flags;
+	float aabb_min[3];
+	uint32_t index_offset; // Byte offset of the indices from the start of this header.
+	float aabb_size[3];
+	uint32_t pad;
+	float uv_min[2];
+	float uv_size[2];
+	float uv2_min[2];
+	float uv2_size[2];
+};
+
+static_assert(sizeof(VirtualGeometryClusterGeometry) == 80);
+
+struct VirtualGeometryPage {
+	uint32_t offset; // Byte offset in the page data.
+	uint32_t size;
+	uint32_t dependency_first; // Pages holding parents of this page's clusters; they must be resident first.
+	uint32_t dependency_count;
+};
+
+static_assert(sizeof(VirtualGeometryPage) == 16);
 
 // Bounding volume hierarchy node over cluster "parts" (clusters simplified into the same parent group).
 // Every node covers a contiguous cluster range, children of a node are contiguous in the node array.
@@ -67,10 +99,13 @@ struct VirtualGeometryHeader {
 	uint32_t magic;
 	uint32_t cluster_count;
 	uint32_t node_count;
-	uint32_t reserved;
+	uint32_t page_count;
+	uint32_t dependency_count;
+	uint32_t data_size; // Page data bytes.
+	uint32_t reserved[2];
 };
 
-static_assert(sizeof(VirtualGeometryHeader) == 16);
+static_assert(sizeof(VirtualGeometryHeader) == 32);
 
 struct VirtualGeometryBuildResult {
 	// Indices of every cluster of every level, finest level first, so the
@@ -78,9 +113,21 @@ struct VirtualGeometryBuildResult {
 	Vector<uint32_t> indices;
 	Vector<VirtualGeometryCluster> clusters;
 	Vector<VirtualGeometryNode> nodes;
+	Vector<uint32_t> cluster_level; // 0 for the finest clusters.
+	Vector<int32_t> cluster_part; // Group this cluster was simplified into, -1 for roots.
+	Vector<int32_t> cluster_source_part; // Group that produced this cluster, -1 for leaves.
 	uint32_t leaf_index_count = 0;
 	uint32_t leaf_cluster_count = 0;
 	uint32_t level_count = 0;
+};
+
+struct VirtualGeometryAttributes {
+	Vector<Vector3> positions;
+	Vector<Vector3> normals;
+	Vector<float> tangents; // 4 per vertex.
+	Vector<Vector2> uv;
+	Vector<Vector2> uv2;
+	Vector<Color> colors;
 };
 
 class VirtualGeometry {
@@ -90,11 +137,24 @@ public:
 	static constexpr uint32_t GROUP_TARGET_SIZE = 8;
 	static constexpr uint32_t MAX_LEVELS = 32;
 	static constexpr uint32_t NODE_FANOUT = 4;
-	static constexpr uint32_t DATA_MAGIC = 0x32444756; // "VGD2".
+	static constexpr uint32_t DATA_MAGIC = 0x33444756; // "VGD3".
+	static constexpr uint32_t PAGE_SIZE = 128 * 1024;
+	static constexpr uint32_t ROOT_PAGE_SIZE = 32 * 1024;
+	static constexpr uint32_t GEOMETRY_FLAG_TANGENT = 1;
+	static constexpr uint32_t GEOMETRY_FLAG_UV = 2;
+	static constexpr uint32_t GEOMETRY_FLAG_UV2 = 4;
+	static constexpr uint32_t GEOMETRY_FLAG_COLOR = 8;
 
-	static Vector<uint8_t> pack(const VirtualGeometryBuildResult &p_result);
-	// Validates serialized data; returns false (and zero counts) for malformed or old-format data.
+	// Layout: header, clusters, nodes, pages, page dependencies (uint32), page data.
+	static Vector<uint8_t> pack(const VirtualGeometryBuildResult &p_result, const VirtualGeometryAttributes &p_attributes);
+	// Validates serialized data; returns false for malformed or old-format data.
+	static bool unpack_header(const Vector<uint8_t> &p_data, VirtualGeometryHeader &r_header);
 	static bool unpack_header(const Vector<uint8_t> &p_data, uint32_t &r_cluster_count, uint32_t &r_node_count);
+	static uint32_t get_page_table_offset(const VirtualGeometryHeader &p_header) { return get_node_data_offset(p_header.cluster_count) + p_header.node_count * sizeof(VirtualGeometryNode); }
+	static uint32_t get_dependency_offset(const VirtualGeometryHeader &p_header) { return get_page_table_offset(p_header) + p_header.page_count * sizeof(VirtualGeometryPage); }
+	static uint32_t get_page_data_offset(const VirtualGeometryHeader &p_header) { return get_dependency_offset(p_header) + p_header.dependency_count * sizeof(uint32_t); }
+	// Decodes one cluster of the page data back into triangles (tests and CPU fallbacks).
+	static bool decode_cluster(const uint8_t *p_page_data, uint32_t p_geometry_offset, Vector<Vector3> &r_positions, Vector<int> &r_indices);
 	static uint32_t get_cluster_data_offset() { return sizeof(VirtualGeometryHeader); }
 	static uint32_t get_node_data_offset(uint32_t p_cluster_count) { return sizeof(VirtualGeometryHeader) + p_cluster_count * sizeof(VirtualGeometryCluster); }
 

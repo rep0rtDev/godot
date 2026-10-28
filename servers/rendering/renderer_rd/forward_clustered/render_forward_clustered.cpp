@@ -506,18 +506,23 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		RID pipeline_rd;
 		const uint32_t ubershader_iterations = 2;
 		bool pipeline_valid = false;
+		// Virtual geometry draws pull their vertices from the cluster pages; surfaces without a pull set draw the full mesh.
+		const bool use_virtual_geometry = surf->vg_cluster_count > 0 && mesh_surface == surf->surface && !emulate_point_size && surf->vg_pull_uniform_set.is_valid();
 		while (pipeline_key.ubershader < ubershader_iterations) {
 			// Skeleton and blend shape.
 			RD::VertexFormatID vertex_format = -1;
 			bool pipeline_motion_vectors = pipeline_key.color_pass_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS;
 			uint64_t input_mask = shader->get_vertex_input_mask(pipeline_key.version, pipeline_key.color_pass_flags, pipeline_key.ubershader);
-			if (surf->owner->mesh_instance.is_valid()) {
+			if (use_virtual_geometry) {
+				vertex_array_rd = RID();
+			} else if (surf->owner->mesh_instance.is_valid()) {
 				mesh_storage->mesh_instance_surface_get_vertex_arrays_and_format(surf->owner->mesh_instance, surf->surface_index, input_mask, pipeline_motion_vectors, emulate_point_size, vertex_array_rd, vertex_format);
 			} else {
 				mesh_storage->mesh_surface_get_vertex_arrays_and_format(mesh_surface, input_mask, pipeline_motion_vectors, emulate_point_size, vertex_array_rd, vertex_format);
 			}
 
 			pipeline_key.vertex_format_id = vertex_format;
+			pipeline_key.vg_pull = use_virtual_geometry ? 1 : 0;
 
 			if (pipeline_key.ubershader) {
 				pipeline_key.shader_specialization = {};
@@ -549,9 +554,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		}
 
 		if (pipeline_valid) {
-			const bool use_virtual_geometry = surf->vg_cluster_count > 0 && mesh_surface == surf->surface && !emulate_point_size;
 			if (use_virtual_geometry) {
-				index_array_rd = mesh_storage->mesh_surface_get_vg_index_array(mesh_surface);
+				index_array_rd = RID();
+				RD::get_singleton()->draw_list_bind_uniform_set(draw_list, surf->vg_pull_uniform_set, 4);
 			} else if (!emulate_point_size) {
 				index_array_rd = mesh_storage->mesh_surface_get_index_array(mesh_surface, element_info.lod_index);
 			} else {
@@ -629,10 +634,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				if (virtual_geometry->uses_indirect_count()) {
 					// Camera ranges: early clusters (visible last frame) and late clusters (found by the occlusion pass).
 					if (!camera_range || p_params->vg_phase != 2) {
-						RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t), surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, offset, surf->vg_command_buffer, camera_range ? 0 : sizeof(uint32_t), surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 					}
 					if (camera_range && p_params->vg_phase != 1) {
-						RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + 2 * range_size, surf->vg_command_buffer, sizeof(uint32_t) * 2, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+						RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + 2 * range_size, surf->vg_command_buffer, sizeof(uint32_t) * 2, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 					}
 					// Clusters rasterized in compute already have depth; only the color pass shades them. Their resolved
 					// depth is pushed slightly back, so they need GREATER_OR_EQUAL instead of the pre-pass EQUAL test.
@@ -687,7 +692,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 								virtual_geometry_material_draws++;
 							} else {
 								for (uint32_t range = 3; range < RendererRD::VirtualGeometryEffect::COMMAND_RANGES; range++) {
-									RD::get_singleton()->draw_list_draw_indexed_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * range_size, surf->vg_command_buffer, sizeof(uint32_t) * range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+									RD::get_singleton()->draw_list_draw_indirect_count(draw_list, surf->vg_command_buffer, RendererRD::VirtualGeometryEffect::HEADER_SIZE + range * range_size, surf->vg_command_buffer, sizeof(uint32_t) * range, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 								}
 							}
 							// Make the next element rebind its own pipeline.
@@ -695,7 +700,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 						}
 					}
 				} else {
-					RD::get_singleton()->draw_list_draw_indirect(draw_list, true, surf->vg_command_buffer, offset, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
+					RD::get_singleton()->draw_list_draw_indirect(draw_list, false, surf->vg_command_buffer, offset, surf->vg_cluster_count, RendererRD::VirtualGeometryEffect::COMMAND_STRIDE);
 				}
 			} else if (indirect) {
 				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
@@ -4434,6 +4439,10 @@ void RenderForwardClustered::_geometry_instance_surface_free(GeometryInstanceSur
 		RD::get_singleton()->free_rid(p_surface->vg_raster_uniform_set);
 	}
 	p_surface->vg_raster_uniform_set = RID();
+	if (p_surface->vg_pull_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_pull_uniform_set)) {
+		RD::get_singleton()->free_rid(p_surface->vg_pull_uniform_set);
+	}
+	p_surface->vg_pull_uniform_set = RID();
 	if (p_surface->vg_material_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
 		RD::get_singleton()->free_rid(p_surface->vg_material_uniform_set);
 	}
@@ -4651,13 +4660,6 @@ void RenderForwardClustered::_virtual_geometry_raster(const RenderDataRD *p_rend
 		// Work buffer: header, traversal queue, candidates, early list, late list.
 		push_constant.list_offset = RendererRD::VirtualGeometryEffect::WORK_HEADER_SIZE / sizeof(uint32_t) + surf->vg_node_count + (p_late ? 2 : 1) * surf->vg_cluster_count;
 		push_constant.flags = surf->vg_raster_flags;
-		if (surf->vg_raster_flags & RendererRD::VirtualGeometryEffect::RASTER_FLAG_COMPRESSED) {
-			const AABB aabb = RendererRD::MeshStorage::get_singleton()->mesh_surface_get_aabb(surf->surface);
-			for (int a = 0; a < 3; a++) {
-				push_constant.aabb_position[a] = aabb.position[a];
-				push_constant.aabb_size[a] = aabb.size[a];
-			}
-		}
 		if (surf->shader) {
 			const RD::PolygonCullMode cull_mode = surf->shader->get_cull_mode_from_cull_variant(surf->owner->mirror ? SceneShaderForwardClustered::ShaderData::CULL_VARIANT_REVERSED : SceneShaderForwardClustered::ShaderData::CULL_VARIANT_NORMAL);
 			if (cull_mode == RD::POLYGON_CULL_BACK) {
@@ -4690,31 +4692,10 @@ void RenderForwardClustered::_virtual_geometry_material_update(GeometryInstanceS
 		p_surface->vg_material_params = rd->uniform_buffer_create(sizeof(RendererRD::VirtualGeometryEffect::MaterialParams));
 	}
 	if (p_surface->vg_material_slot != p_slot || p_surface->vg_material_size != size) {
-		const uint32_t vertex_count = mesh_storage->mesh_surface_get_vertex_count(p_surface->surface);
-		uint32_t offsets[RSE::ARRAY_MAX];
-		uint32_t vertex_element_size = 0;
-		uint32_t normal_element_size = 0;
-		uint32_t attrib_element_size = 0;
-		uint32_t skin_element_size = 0;
-		RenderingServer::get_singleton()->mesh_surface_make_offsets_from_format(format & ~uint64_t(RSE::ARRAY_FORMAT_INDEX), vertex_count, 0, offsets, vertex_element_size, normal_element_size, attrib_element_size, skin_element_size);
-
 		RendererRD::VirtualGeometryEffect::MaterialParams params = {};
 		params.size[0] = size.x;
 		params.size[1] = size.y;
 		params.slot = p_slot;
-		params.flags = (mesh_storage->mesh_surface_has_16_bit_indices(p_surface->surface) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_INDEX_16 : 0) |
-				((format & RSE::ARRAY_FORMAT_TANGENT) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_TANGENT : 0) |
-				((format & RSE::ARRAY_FORMAT_COLOR) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_COLOR : 0) |
-				((format & RSE::ARRAY_FORMAT_TEX_UV) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_UV : 0) |
-				((format & RSE::ARRAY_FORMAT_TEX_UV2) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_UV2 : 0) |
-				((format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) ? RendererRD::VirtualGeometryEffect::MATERIAL_FLAG_COMPRESSED : 0);
-		params.vertex_count = vertex_count;
-		params.normal_stride = normal_element_size;
-		params.attrib_stride = attrib_element_size;
-		params.color_offset = offsets[RSE::ARRAY_COLOR];
-		params.uv_offset = offsets[RSE::ARRAY_TEX_UV];
-		params.uv2_offset = offsets[RSE::ARRAY_TEX_UV2];
-		params.normal_offset = offsets[RSE::ARRAY_NORMAL];
 		params.depth_bias = RendererRD::VirtualGeometryEffect::SOFTWARE_DEPTH_BIAS;
 		rd->buffer_update(p_surface->vg_material_params, 0, sizeof(params), &params);
 		p_surface->vg_material_slot = p_slot;
@@ -4727,22 +4708,18 @@ void RenderForwardClustered::_virtual_geometry_material_update(GeometryInstanceS
 	if (p_surface->vg_material_uniform_set.is_valid() && rd->uniform_set_is_valid(p_surface->vg_material_uniform_set)) {
 		rd->free_rid(p_surface->vg_material_uniform_set);
 	}
-	const RID vertex_buffer = mesh_storage->mesh_surface_get_vertex_buffer(p_surface->surface);
-	const RID attribute_buffer = mesh_storage->mesh_surface_get_attribute_buffer(p_surface->surface);
-	const RID buffers[6] = {
+	const RID buffers[5] = {
 		visibility,
 		virtual_geometry->get_entry_buffer(),
 		mesh_storage->mesh_surface_get_vg_cluster_buffer(p_surface->surface),
-		mesh_storage->mesh_surface_get_index_buffer(p_surface->surface),
-		vertex_buffer,
-		// Surfaces without color/UV have no attribute buffer; the shader then never reads binding 5.
-		attribute_buffer.is_valid() ? attribute_buffer : vertex_buffer,
+		mesh_storage->mesh_surface_get_vg_page_buffer(p_surface->surface),
+		mesh_storage->mesh_surface_get_vg_page_table_buffer(p_surface->surface),
 	};
 	Vector<RD::Uniform> uniforms;
-	for (uint32_t i = 0; i < 6; i++) {
+	for (uint32_t i = 0; i < 5; i++) {
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, i, buffers[i]));
 	}
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, p_surface->vg_material_params));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 5, p_surface->vg_material_params));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, tiles));
 	p_surface->vg_material_uniform_set = rd->uniform_set_create(uniforms, p_shader, 4);
 	p_surface->vg_material_visibility = visibility;
@@ -4895,11 +4872,26 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 			sdcache->vg_traverse_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_TRAVERSE);
 			sdcache->vg_instance_uniform_set = virtual_geometry->create_uniform_set(vg_cluster_buffer, sdcache->vg_command_buffer, sdcache->vg_visibility_buffer, vg_node_buffer, sdcache->vg_work_buffer, RendererRD::VirtualGeometryEffect::MODE_INSTANCE_OCCLUSION);
 			sdcache->vg_node_count = vg_node_count;
-			const uint64_t vg_format = mesh_storage->mesh_surface_get_format(sdcache->surface);
-			if (virtual_geometry->uses_software_raster() && !(vg_format & RSE::ARRAY_FLAG_USE_2D_VERTICES)) {
-				sdcache->vg_raster_uniform_set = virtual_geometry->create_raster_uniform_set(vg_cluster_buffer, sdcache->vg_work_buffer, mesh_storage->mesh_surface_get_vertex_buffer(sdcache->surface), mesh_storage->mesh_surface_get_index_buffer(sdcache->surface));
-				sdcache->vg_raster_flags = (mesh_storage->mesh_surface_has_16_bit_indices(sdcache->surface) ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_INDEX_16 : 0) |
-						((vg_format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) ? RendererRD::VirtualGeometryEffect::RASTER_FLAG_COMPRESSED : 0);
+			const RID vg_page_buffer = mesh_storage->mesh_surface_get_vg_page_buffer(sdcache->surface);
+			const RID vg_page_table_buffer = mesh_storage->mesh_surface_get_vg_page_table_buffer(sdcache->surface);
+			if (virtual_geometry->uses_software_raster()) {
+				sdcache->vg_raster_uniform_set = virtual_geometry->create_raster_uniform_set(vg_cluster_buffer, sdcache->vg_work_buffer, vg_page_buffer, vg_page_table_buffer);
+			}
+			// Hardware raster pulls vertices from the pages through set 4; without a fifth set the full mesh is drawn instead.
+			if (RD::get_singleton()->limit_get(RD::LIMIT_MAX_BOUND_UNIFORM_SETS) > 4 && scene_shader.default_material_shader_ptr) {
+				scene_shader.enable_vg_shader_group();
+				const RID pull_shader = scene_shader.default_material_shader_ptr->get_shader_variant(SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS, 0, false, true);
+				if (pull_shader.is_valid()) {
+					if (sdcache->vg_material_params.is_null()) {
+						sdcache->vg_material_params = RD::get_singleton()->uniform_buffer_create(sizeof(RendererRD::VirtualGeometryEffect::MaterialParams));
+					}
+					Vector<RD::Uniform> uniforms;
+					uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, vg_cluster_buffer));
+					uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, vg_page_buffer));
+					uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vg_page_table_buffer));
+					uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 5, sdcache->vg_material_params));
+					sdcache->vg_pull_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, pull_shader, 4);
+				}
 			}
 		}
 		sdcache->vg_cluster_count = vg_cluster_count;
