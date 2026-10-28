@@ -6334,7 +6334,7 @@
 			Virtual geometry streaming pool slots currently holding a page.
 		</constant>
 		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_PAGE_POOL_SLOTS" value="17" enum="RenderingInfo">
-			Size of the virtual geometry streaming pool in pages ([member ProjectSettings.rendering/virtual_geometry/streaming/resident_pages]).
+			Size of the virtual geometry streaming pool in pages ([code]rendering/virtual_geometry/streaming/resident_pages[/code]).
 		</constant>
 		<constant name="RENDERING_INFO_VIRTUAL_GEOMETRY_PAGES_INSTALLED_IN_FRAME" value="18" enum="RenderingInfo">
 			Virtual geometry pages uploaded into the pool during the last frame.
