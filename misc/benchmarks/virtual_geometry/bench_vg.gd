@@ -138,6 +138,17 @@ func _init() -> void:
 		wall.mesh = box
 		wall.position = Vector3((side - 1) * 1.5 - side * 0.375, 2, 3)
 		root.add_child(wall)
+	if arg("plate", "0") == "1":
+		# Thin bright plate standing on the floor: the SDF resolves it to a whole cell, the screen trace to its true position.
+		var plate := MeshInstance3D.new()
+		var pbox := BoxMesh.new()
+		pbox.size = Vector3(6, 2, 0.02)
+		plate.mesh = pbox
+		plate.position = Vector3(side * 1.5, -2, -(side - 1) * 3.0 - 2.0)
+		var pm := StandardMaterial3D.new()
+		pm.albedo_color = Color(1, 0.1, 0.1)
+		plate.material_override = pm
+		root.add_child(plate)
 	wall_off = int(arg("wall_off", "-1"))
 	move_frame = int(arg("move", "-1"))
 	cam_move = float(arg("cam_move", "0"))
