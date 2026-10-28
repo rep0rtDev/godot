@@ -150,6 +150,10 @@ private:
 			uint32_t vg_cluster_count = 0;
 			uint32_t vg_leaf_index_count = 0;
 			Vector<uint8_t> vg_cluster_data;
+			// Source mesh kept on the CPU when the regular GPU buffers are not created (Forward+ draws from the pages).
+			Vector<uint8_t> vg_source_vertex_data;
+			Vector<uint8_t> vg_source_attribute_data;
+			Vector<uint8_t> vg_source_index_data;
 
 			AABB aabb;
 
@@ -564,9 +568,13 @@ public:
 	// back this frame's. Call once per frame per surface, outside of draw and compute lists.
 	void mesh_surface_vg_stream(void *p_surface, uint64_t p_frame);
 	uint32_t mesh_surface_get_vg_resident_pages(void *p_surface) const;
+	// Set by the renderer when it draws virtual geometry surfaces from their pages; such surfaces then get no
+	// regular vertex/index buffers (skinned and blend shape surfaces excepted).
+	static void set_virtual_geometry_pull_supported(bool p_supported) { vg_pull_supported = p_supported; }
 
 private:
 	static HashMap<uint32_t, Mesh::Surface *> vg_streaming_surfaces;
+	static bool vg_pull_supported;
 	static uint32_t vg_stream_id_counter;
 	static const VirtualGeometryPage *_vg_pages(const Mesh::Surface *p_surface);
 	static const uint32_t *_vg_dependencies(const Mesh::Surface *p_surface);

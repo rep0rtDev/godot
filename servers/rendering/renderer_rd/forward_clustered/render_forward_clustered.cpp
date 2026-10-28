@@ -5935,6 +5935,7 @@ RenderForwardClustered::RenderForwardClustered() {
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
 	ss_effects = memnew(RendererRD::SSEffects);
 	virtual_geometry = memnew(RendererRD::VirtualGeometryEffect);
+	RendererRD::MeshStorage::set_virtual_geometry_pull_supported(RD::get_singleton()->limit_get(RD::LIMIT_MAX_BOUND_UNIFORM_SETS) > 4);
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);

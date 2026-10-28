@@ -381,10 +381,17 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 	const bool requested_storage_buffer = (new_surface.format & RSE::ARRAY_FLAG_USE_STORAGE_BUFFER);
 	// Virtual geometry rasterizes small clusters in compute, reading positions and indices directly.
 	const bool vg_storage = !new_surface.vg_cluster_data.is_empty();
+	// Forward+ pulls virtual geometry vertices from the cluster pages, so the regular buffers would only cost memory.
+	const bool vg_only = vg_storage && vg_pull_supported && !use_as_storage && !(new_surface.format & RSE::ARRAY_FORMAT_BONES) && !(new_surface.format & RSE::ARRAY_FLAG_USE_2D_VERTICES) && new_surface.index_count > 0 && VirtualGeometry::unpack_header(new_surface.vg_cluster_data, s->vg_header);
+	if (vg_only) {
+		s->vg_source_vertex_data = new_surface.vertex_data;
+		s->vg_source_attribute_data = new_surface.attribute_data;
+		s->vg_source_index_data = new_surface.index_data;
+	}
 	const BitField<RD::BufferCreationBits> as_storage_flag = (use_as_storage || requested_storage_buffer || vg_storage) ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0;
 	const BitField<RD::BufferCreationBits> requested_storage_flag = (requested_storage_buffer || vg_storage) ? RD::BUFFER_CREATION_AS_STORAGE_BIT : 0;
 
-	if (new_surface.vertex_data.size()) {
+	if (new_surface.vertex_data.size() && !vg_only) {
 		// If we have an uncompressed surface that contains normals, but not tangents, we need to differentiate the array
 		// from a compressed array in the shader. To do so, we allow the normal to read 4 components out of the buffer
 		// But only give it 2 components per normal. So essentially, each vertex reads the next normal in normal.zw.
@@ -404,7 +411,7 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 		}
 	}
 
-	if (new_surface.attribute_data.size()) {
+	if (new_surface.attribute_data.size() && !vg_only) {
 		s->attribute_buffer = RD::get_singleton()->vertex_buffer_create(new_surface.attribute_data.size(), new_surface.attribute_data, requested_storage_flag);
 		s->attribute_buffer_size = new_surface.attribute_data.size();
 	}
@@ -422,8 +429,10 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 	if (new_surface.index_count) {
 		bool is_index_16 = new_surface.vertex_count <= 65536 && new_surface.vertex_count > 0;
 
-		s->index_buffer = RD::get_singleton()->index_buffer_create(new_surface.index_count, is_index_16 ? RD::INDEX_BUFFER_FORMAT_UINT16 : RD::INDEX_BUFFER_FORMAT_UINT32, new_surface.index_data, false, requested_storage_flag);
-		s->index_buffer_size = new_surface.index_data.size();
+		if (!vg_only) {
+			s->index_buffer = RD::get_singleton()->index_buffer_create(new_surface.index_count, is_index_16 ? RD::INDEX_BUFFER_FORMAT_UINT16 : RD::INDEX_BUFFER_FORMAT_UINT32, new_surface.index_data, false, requested_storage_flag);
+			s->index_buffer_size = new_surface.index_data.size();
+		}
 		s->index_count = new_surface.index_count;
 		VirtualGeometryHeader vg_header;
 		if (VirtualGeometry::unpack_header(new_surface.vg_cluster_data, vg_header)) {
@@ -465,7 +474,9 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 				s->vg_page_table_buffer = RD::get_singleton()->storage_buffer_create(s->vg_page_table.size() * sizeof(uint32_t), s->vg_page_table.to_byte_array());
 			}
 		}
-		s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
+		if (!vg_only) {
+			s->index_array = RD::get_singleton()->index_array_create(s->index_buffer, 0, s->index_count);
+		}
 		if (new_surface.lods.size()) {
 			s->lods = memnew_arr(Mesh::Surface::LOD, new_surface.lods.size());
 			s->lod_count = new_surface.lods.size();
@@ -736,6 +747,7 @@ RID MeshStorage::mesh_surface_get_material(RID p_mesh, int p_surface) const {
 
 HashMap<uint32_t, MeshStorage::Mesh::Surface *> MeshStorage::vg_streaming_surfaces;
 uint32_t MeshStorage::vg_stream_id_counter = 0;
+bool MeshStorage::vg_pull_supported = false;
 
 const VirtualGeometryPage *MeshStorage::_vg_pages(const Mesh::Surface *p_surface) {
 	return reinterpret_cast<const VirtualGeometryPage *>(p_surface->vg_cluster_data.ptr() + VirtualGeometry::get_page_table_offset(p_surface->vg_header));
@@ -887,7 +899,10 @@ RenderingServerTypes::SurfaceData MeshStorage::mesh_get_surface(RID p_mesh, int 
 
 	RenderingServerTypes::SurfaceData sd;
 	sd.format = s.format;
-	if (s.vertex_buffer.is_valid()) {
+	if (s.vertex_buffer.is_null() && s.vg_cluster_count > 0) {
+		sd.vertex_data = s.vg_source_vertex_data;
+		sd.attribute_data = s.vg_source_attribute_data;
+	} else if (s.vertex_buffer.is_valid()) {
 		sd.vertex_data = RD::get_singleton()->buffer_get_data(s.vertex_buffer);
 		// When using an uncompressed buffer with normals, but without tangents, we have to trim the padding.
 		if (!(s.format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) && (s.format & RSE::ARRAY_FORMAT_NORMAL) && !(s.format & RSE::ARRAY_FORMAT_TANGENT)) {
@@ -905,7 +920,7 @@ RenderingServerTypes::SurfaceData MeshStorage::mesh_get_surface(RID p_mesh, int 
 	sd.primitive = s.primitive;
 
 	if (sd.index_count) {
-		sd.index_data = RD::get_singleton()->buffer_get_data(s.index_buffer);
+		sd.index_data = s.index_buffer.is_valid() ? RD::get_singleton()->buffer_get_data(s.index_buffer) : s.vg_source_index_data;
 	}
 	sd.vg_cluster_data = s.vg_cluster_data;
 	sd.vg_leaf_index_count = s.vg_leaf_index_count;
