@@ -224,6 +224,10 @@ private:
 		float uv_scale2[2];
 		float uv_scale3[2];
 		float uv_scale4[2];
+		float vsm_light_view[16];
+		float vsm_depth_row[4];
+		float vsm_params[4];
+		uint32_t vsm_info[4];
 	};
 
 	uint32_t max_directional_lights;

@@ -515,6 +515,12 @@ vec3 get_energy_compensation(vec3 f0, float env) {
 	return 1.0 + f0 * (1.0 / env - 1.0);
 }
 
+layout(set = 1, binding = 39) uniform texture2D vsm_pool;
+layout(set = 1, binding = 40, std430) restrict readonly buffer VSMPageTable {
+	uvec2 data[];
+}
+vsm_page_table;
+
 #ifdef TEXTURE_STREAMING
 // Texture streaming material feedback buffer access
 layout(set = 1, binding = 38, std430) buffer restrict MaterialFeedbackBuffer {

@@ -1379,6 +1379,57 @@ vec3 encode24(vec3 v) {
 }
 #endif // MODE_RENDER_NORMAL_ROUGHNESS
 
+// Virtual shadow map lookup for directional light i: walks the clipmap from the level matching the pixel footprint
+// to coarser ones until a resident page is found. Returns false when none is (the regular shadow map is used then).
+bool vsm_directional_shadow(uint i, vec3 world, float view_z, float proj_y, float viewport_h, out float r_shadow) {
+	vec4 params = directional_lights.data[i].vsm_params;
+	uvec4 info = directional_lights.data[i].vsm_info;
+	vec2 lp = (directional_lights.data[i].vsm_light_view * vec4(world, 1.0)).xy;
+	float ref = dot(directional_lights.data[i].vsm_depth_row, vec4(world, 1.0));
+	float footprint = view_z * 2.0 / (proj_y * viewport_h);
+	int levels = int(params.y);
+	int level = clamp(int(ceil(log2(footprint * 16384.0 / params.x))), 0, levels - 1);
+	for (; level < levels; level++) {
+		float page_size = params.x * float(1 << level) / 128.0;
+		vec2 pp = lp / page_size;
+		ivec2 page = ivec2(floor(pp));
+		uint key = (uint(page.x) & 0xFFFFu) | (uint(page.y) << 16u);
+		uvec2 e = vsm_page_table.data[info.y + uint(level) * 16384u + uint(page.y & 127) * 128u + uint(page.x & 127)];
+		if ((e.x & 1u) == 0u || e.y != key) {
+			continue;
+		}
+		uint phys = e.x >> 1u;
+		vec2 f = fract(pp) * 128.0;
+		ivec2 base = ivec2((phys % info.z) * 128u, (phys / info.z) * 128u);
+		ivec2 c = ivec2(f);
+		if (info.w == 2u) {
+			r_shadow = ref;
+			return true;
+		} else if (info.w == 3u) {
+			r_shadow = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), base + clamp(c, ivec2(0), ivec2(127)), 0).r;
+			return true;
+		} else if (info.w == 4u) {
+			r_shadow = float(level) / 16.0;
+			return true;
+		}
+		float lit = 0.0;
+		for (int dy = -1; dy <= 1; dy++) {
+			for (int dx = -1; dx <= 1; dx++) {
+				ivec2 t = clamp(c + ivec2(dx, dy), ivec2(0), ivec2(127));
+				float d = texelFetch(sampler2D(vsm_pool, SAMPLER_NEAREST_CLAMP), base + t, 0).r;
+				lit += ref > d ? 1.0 : 0.0;
+			}
+		}
+		r_shadow = lit / 9.0;
+		return true;
+	}
+	if (info.w != 0u) {
+		r_shadow = info.w == 1u ? 1.0 : 0.0;
+		return true;
+	}
+	return false;
+}
+
 void fragment_shader(in SceneData scene_data) {
 	uint instance_index = instance_index_interp;
 
@@ -2815,6 +2866,19 @@ void fragment_shader(in SceneData scene_data) {
 
 							float shadow2 = sample_directional_pcf_shadow(directional_shadow_atlas, scene_data.directional_shadow_pixel_size * directional_lights.data[i].soft_shadow_scale * (blur_factor2 + (1.0 - blur_factor2) * float(directional_lights.data[i].blend_splits)), pssm_coord, scene_data.taa_frame_count);
 							shadow = mix(shadow, shadow2, pssm_blend);
+						}
+					}
+
+					if (directional_lights.data[i].vsm_info.x != 0u) {
+						vec4 vsm_v = vec4(vertex, 1.0);
+						vsm_v.xyz += light_dir * directional_lights.data[i].shadow_bias[0];
+						float vsm_texel = directional_lights.data[i].vsm_params.x / 16384.0 * exp2(ceil(log2(max(depth_z * 2.0 / (projection_matrix[1][1] * scene_data.viewport_size.y) * 16384.0 / directional_lights.data[i].vsm_params.x, 1.0))));
+						vec3 vsm_normal_bias = base_normal_bias * directional_lights.data[i].vsm_params.w * vsm_texel;
+						vsm_normal_bias -= light_dir * dot(light_dir, vsm_normal_bias);
+						vsm_v.xyz += vsm_normal_bias;
+						float vsm_shadow;
+						if (vsm_directional_shadow(i, (inv_view_matrix * vsm_v).xyz, depth_z, projection_matrix[1][1], scene_data.viewport_size.y, vsm_shadow)) {
+							shadow = vsm_shadow;
 						}
 					}
 

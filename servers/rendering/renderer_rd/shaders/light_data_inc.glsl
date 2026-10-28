@@ -90,4 +90,8 @@ struct DirectionalLightData {
 	vec2 uv_scale2;
 	vec2 uv_scale3;
 	vec2 uv_scale4;
+	mat4 vsm_light_view;
+	vec4 vsm_depth_row;
+	vec4 vsm_params; // base extent, levels, unused, normal bias
+	uvec4 vsm_info; // enabled, page table offset, pool columns, lit where no page
 };

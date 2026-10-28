@@ -2197,7 +2197,8 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
 	real_t range = max_distance - min_distance;
 
 	int splits = 0;
-	switch (RSG::light_storage->light_directional_get_shadow_mode(p_instance->base)) {
+	static const bool virtual_shadows = GLOBAL_GET("rendering/virtual_shadows/enabled");
+	switch (virtual_shadows ? RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL : RSG::light_storage->light_directional_get_shadow_mode(p_instance->base)) {
 		case RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL:
 			splits = 1;
 			break;

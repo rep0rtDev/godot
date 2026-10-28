@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
 #include "servers/rendering/renderer_rd/effects/virtual_geometry_effect.h"
+#include "servers/rendering/renderer_rd/effects/virtual_shadows_effect.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/best_fit_normal.glsl.gen.h"
@@ -796,6 +797,7 @@ private:
 #endif
 	RendererRD::MotionVectorsStore *motion_vectors_store = nullptr;
 	RendererRD::VirtualGeometryEffect *virtual_geometry = nullptr;
+	RendererRD::VirtualShadowsEffect *virtual_shadows = nullptr;
 	uint64_t virtual_geometry_pass = 0;
 	LocalVector<GeometryInstanceSurfaceDataCache *> virtual_geometry_surfaces;
 	uint32_t virtual_geometry_camera_surface_count = 0;

@@ -1768,6 +1768,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	if (render_shadows) {
 		_render_shadow_end();
+		virtual_shadows->copy_pages();
 	}
 
 	if (rb_data.is_valid() && ss_effects) {
@@ -2400,6 +2401,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 		}
 	}
+	if (virtual_shadows->is_enabled()) {
+		virtual_shadows->begin_frame(RSG::rasterizer->get_frame_number());
+		if (depth_pre_pass && !use_msaa && rb.is_valid() && p_render_data->scene_data->view_count == 1 && !is_reflection_probe) {
+			virtual_shadows->mark(rb->get_depth_texture(), *p_render_data->scene_data, rb->get_internal_size());
+		}
+	}
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sscs, using_sdfgi || using_voxelgi, normal_roughness_views, voxel_gi_views);
 
 	if (current_cluster_builder) {
@@ -3022,6 +3029,23 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 	} else {
 		//render shadow
 		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
+
+		if (virtual_shadows->is_enabled() && light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL && p_pass == 0) {
+			// Virtual shadow pages: windows of the clipmap rendered into the scratch target, copied after _render_shadow_end().
+			const uint64_t frame = RSG::rasterizer->get_frame_number();
+			LocalVector<AABB> moved;
+			for (int i = 0; i < int(p_instances.size()); i++) {
+				const GeometryInstanceForwardClustered *gi = static_cast<const GeometryInstanceForwardClustered *>(p_instances[i]);
+				if (gi->prev_transform_change_frame != 0xFFFFFFFF && gi->prev_transform_change_frame + 1 >= frame) {
+					moved.push_back(gi->transformed_aabb);
+				}
+			}
+			if (virtual_shadows->plan_light(p_light, light_transform, light_projection.get_z_far(), light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_NORMAL_BIAS), moved)) {
+				for (const RendererRD::VirtualShadowsEffect::Window &win : virtual_shadows->get_windows()) {
+					_render_shadow_append(virtual_shadows->get_scratch_framebuffer(), p_instances, virtual_shadows->get_window_projection(win), virtual_shadows->get_window_transform(win), zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, win.rect, true, true, false, false, p_render_info, p_viewport_size, p_main_cam_transform);
+				}
+			}
+		}
 	}
 }
 
@@ -4020,6 +4044,21 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(u);
 	}
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
+	{
+		RD::Uniform u;
+		u.binding = 39;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID pool = virtual_shadows->get_pool_texture();
+		u.append_id(pool.is_valid() ? pool : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 40;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(virtual_shadows->get_page_table_buffer());
+		uniforms.push_back(u);
+	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);
 }
@@ -4232,6 +4271,21 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 		RID instance_buffer = scene_shader.default_material_feedback_buffer;
 		u.append_id(instance_buffer);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 39;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID pool = virtual_shadows->get_pool_texture();
+		u.append_id(pool.is_valid() ? pool : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 40;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(virtual_shadows->get_page_table_buffer());
 		uniforms.push_back(u);
 	}
 
@@ -5935,6 +5989,7 @@ RenderForwardClustered::RenderForwardClustered() {
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
 	ss_effects = memnew(RendererRD::SSEffects);
 	virtual_geometry = memnew(RendererRD::VirtualGeometryEffect);
+	virtual_shadows = memnew(RendererRD::VirtualShadowsEffect);
 	RendererRD::MeshStorage::set_virtual_geometry_pull_supported(RD::get_singleton()->limit_get(RD::LIMIT_MAX_BOUND_UNIFORM_SETS) > 4);
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
@@ -5945,6 +6000,9 @@ RenderForwardClustered::RenderForwardClustered() {
 RenderForwardClustered::~RenderForwardClustered() {
 	if (virtual_geometry) {
 		memdelete(virtual_geometry);
+	}
+	if (virtual_shadows) {
+		memdelete(virtual_shadows);
 		virtual_geometry = nullptr;
 	}
 	if (ss_effects != nullptr) {

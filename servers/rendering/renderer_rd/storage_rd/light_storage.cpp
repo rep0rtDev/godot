@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
 #include "core/os/os.h"
+#include "servers/rendering/renderer_rd/effects/virtual_shadows_effect.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -830,6 +831,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 					int limit = smode == RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL ? 0 : (smode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS ? 1 : 3);
 					light_data.blend_splits = (smode != RSE::LIGHT_DIRECTIONAL_SHADOW_ORTHOGONAL) && light->directional_blend_splits;
+					VirtualShadowsEffect::get_singleton()->fill_light_data(light_instance->self, p_using_shadows && light->shadow, light_data.vsm_light_view, light_data.vsm_depth_row, light_data.vsm_params, light_data.vsm_info);
 					for (int j = 0; j < 4; j++) {
 						Rect2 atlas_rect = light_instance->shadow_transform[j].atlas_rect;
 						Projection correction;

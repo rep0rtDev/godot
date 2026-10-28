@@ -3766,6 +3766,12 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/virtual_geometry/streaming/pages_per_frame", PROPERTY_HINT_RANGE, "1,64,1"), 4);
 	GLOBAL_DEF("rendering/virtual_geometry/debug/collect_statistics", false);
 	GLOBAL_DEF("rendering/virtual_geometry/occlusion_culling", true);
+	GLOBAL_DEF_RST("rendering/virtual_shadows/enabled", false);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/max_physical_pages", PROPERTY_HINT_RANGE, "256,8192,1"), 2048);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/windows_per_frame", PROPERTY_HINT_RANGE, "1,64,1"), 16);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/virtual_shadows/base_extent", PROPERTY_HINT_RANGE, "0.5,64,0.5,suffix:m"), 4.0);
+	// 0 off, 1 lit where no page, 2 reference depth, 3 stored depth, 4 level.
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/virtual_shadows/debug/mode", PROPERTY_HINT_RANGE, "0,4,1"), 0);
 	GLOBAL_DEF("rendering/virtual_geometry/software_raster", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/virtual_geometry/software_raster_max_pixels", PROPERTY_HINT_RANGE, "1,256,0.1"), 64.0);
 

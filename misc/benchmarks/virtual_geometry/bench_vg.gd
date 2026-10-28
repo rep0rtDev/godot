@@ -10,6 +10,8 @@ var frame := 0
 var cam: Camera3D
 var wall: MeshInstance3D
 var wall_off := -1
+var move_frame := -1
+var first_mi: MeshInstance3D
 var times := PackedFloat64Array()
 var gpu_times := PackedFloat64Array()
 var last := 0
@@ -93,10 +95,20 @@ func _init() -> void:
 		for m in meshes.size():
 			meshes[m].save_virtual_geometry_pages("user://bench_%d.vgpages" % m)
 	var root := Node3D.new()
+	if arg("floor", "0") == "1":
+		# A shadow receiver under the spheres, for shadow comparisons.
+		var floor_mesh := PlaneMesh.new()
+		floor_mesh.size = Vector2(400, 400)
+		var floor_mi := MeshInstance3D.new()
+		floor_mi.mesh = floor_mesh
+		floor_mi.position = Vector3(0, -3, 0)
+		root.add_child(floor_mi)
 	var side := int(ceil(sqrt(count)))
 	for i in count:
 		var mi := MeshInstance3D.new()
 		mi.mesh = meshes[i % meshes.size()]
+		if i == 0:
+			first_mi = mi
 		mi.position = Vector3((i % side) * 3.0, 0, -(i / side) * 3.0)
 		root.add_child(mi)
 	if arg("wall", "0") == "1":
@@ -108,6 +120,7 @@ func _init() -> void:
 		wall.position = Vector3((side - 1) * 1.5 - side * 0.375, 2, 3)
 		root.add_child(wall)
 	wall_off = int(arg("wall_off", "-1"))
+	move_frame = int(arg("move", "-1"))
 	if arg("backdrop", "0") == "1":
 		# Transparent plane behind the grid. The transparent pass depth-tests against the finished opaque depth,
 		# so it covers any pixel whose depth was lost, regardless of draw order.
@@ -142,6 +155,9 @@ func _init() -> void:
 
 func _process(_delta: float) -> bool:
 	frame += 1
+	if first_mi and frame == move_frame:
+		# Moves one caster so that its cached shadow has to be redrawn.
+		first_mi.position += Vector3(6, 0, 0)
 	if wall and frame == wall_off:
 		wall.visible = false
 	var now := Time.get_ticks_usec()
