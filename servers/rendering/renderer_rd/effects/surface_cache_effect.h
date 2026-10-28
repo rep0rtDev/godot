@@ -34,6 +34,7 @@
 #include "core/templates/local_vector.h"
 #include "core/templates/paged_array.h"
 #include "servers/rendering/renderer_geometry_instance.h"
+#include "servers/rendering/renderer_rd/shaders/effects/surface_cache_light.glsl.gen.h"
 #include "servers/rendering/rendering_device.h"
 
 namespace RendererRD {
@@ -68,6 +69,7 @@ public:
 		uint32_t captured = 0;
 		uint32_t dirty = 0;
 		uint32_t atlas_texels = 0;
+		uint32_t lit = 0;
 	};
 
 	typedef void (*CaptureFunction)(void *p_userdata, const Transform3D &p_transform, const Projection &p_projection, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_rect);
@@ -81,6 +83,11 @@ public:
 	void begin_frame(uint64_t p_frame, const PagedArray<RenderGeometryInstance *> &p_instances, const Vector3 &p_camera_position);
 	// Captures dirty cards within the budget, nearest to the camera first.
 	void capture(CaptureFunction p_capture, void *p_userdata);
+	// Direct lighting of cards captured this frame plus a round-robin share of the rest. Light buffers are in the
+	// camera view space given by p_view_to_world; SDF cascades (may be empty) give shadows.
+	void light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult);
+	RID get_direct_texture() const { return direct; }
+	void set_light_debug(bool p_debug) { light_debug = p_debug; }
 
 	RID get_albedo_texture() const { return albedo; }
 	RID get_normal_texture() const { return normal; }
@@ -111,6 +118,7 @@ private:
 	RID orm;
 	RID emission;
 	RID depth;
+	RID direct;
 	RID depth_stencil;
 	RID framebuffer;
 
@@ -134,6 +142,22 @@ private:
 	Stats stats;
 	PagedArrayPool<RenderGeometryInstance *> capture_pool;
 	PagedArray<RenderGeometryInstance *> capture_list;
+
+	SurfaceCacheLightShaderRD light_shader;
+	RID light_shader_version;
+	RID light_pipeline;
+	RID card_buffer;
+	uint32_t card_buffer_size = 0;
+	RID light_params_buffer;
+	RID light_uniform_set;
+	RID sdf_uniform_set;
+	RID sdf_params_buffer;
+	RID dummy_sdf_tex;
+	Vector<RID> sdf_uniform_set_textures;
+	LocalVector<uint32_t> captured_this_frame;
+	uint32_t light_round_robin = 0;
+	uint32_t light_share = 8;
+	bool light_debug = false;
 
 	bool _allocate_rect(const Size2i &p_size, Rect2i &r_rect);
 	void _free_rect(const Rect2i &p_rect);

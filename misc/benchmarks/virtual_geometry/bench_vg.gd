@@ -148,6 +148,18 @@ func _init() -> void:
 		root.add_child(backdrop)
 	var light := DirectionalLight3D.new()
 	light.light_angular_distance = float(arg("soft", "0"))
+	if arg("sdfgi", "0") == "1":
+		var we := WorldEnvironment.new()
+		var env := Environment.new()
+		env.background_mode = Environment.BG_COLOR
+		env.background_color = Color(0.2, 0.2, 0.25)
+		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+		env.ambient_light_color = Color(0.2, 0.2, 0.25)
+		env.sdfgi_enabled = true
+		env.sdfgi_cascades = 4
+		env.sdfgi_min_cell_size = 0.2
+		we.environment = env
+		root.add_child(we)
 	light.shadow_enabled = arg("shadows", "1") == "1"
 	light.rotation_degrees = Vector3(-50, 30, 0)
 	root.add_child(light)
@@ -160,6 +172,7 @@ func _init() -> void:
 		cam.rotation_degrees = Vector3(-2, 0, 0)
 	root.add_child(cam)
 	get_root().add_child(root)
+	get_root().debug_draw = int(arg("debug_draw", "0")) as Viewport.DebugDraw
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	Engine.max_fps = 0
 	RenderingServer.viewport_set_measure_render_time(get_root().get_viewport_rid(), true)

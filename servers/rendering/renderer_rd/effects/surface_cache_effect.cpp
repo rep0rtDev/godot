@@ -31,6 +31,7 @@
 #include "surface_cache_effect.h"
 
 #include "core/config/project_settings.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -49,6 +50,7 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 		return;
 	}
 	debug_mode = GLOBAL_GET("rendering/global_illumination/surface_cache/debug/mode");
+	light_debug = debug_mode == 7;
 	atlas_size = GLOBAL_GET("rendering/global_illumination/surface_cache/atlas_size");
 	cards_per_frame = GLOBAL_GET("rendering/global_illumination/surface_cache/cards_per_frame");
 	texel_density = GLOBAL_GET("rendering/global_illumination/surface_cache/texels_per_meter");
@@ -71,6 +73,9 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 	tf.format = RD::DATA_FORMAT_R32_SFLOAT;
 	depth = RD::get_singleton()->texture_create(tf, RD::TextureView());
 	RD::get_singleton()->set_resource_name(depth, "Surface cache depth");
+	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	direct = RD::get_singleton()->texture_create(tf, RD::TextureView());
+	RD::get_singleton()->set_resource_name(direct, "Surface cache direct light");
 	tf.format = RD::get_singleton()->texture_is_format_supported_for_usage(RD::DATA_FORMAT_D16_UNORM, RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ? RD::DATA_FORMAT_D16_UNORM : RD::DATA_FORMAT_X8_D24_UNORM_PACK32;
 	tf.usage_bits = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 	depth_stencil = RD::get_singleton()->texture_create(tf, RD::TextureView());
@@ -80,14 +85,34 @@ SurfaceCacheEffect::SurfaceCacheEffect() {
 
 	capture_list.set_page_pool(&capture_pool);
 	// Clear once so untouched atlas texels read as empty.
-	for (RID t : { albedo, normal, orm, emission, depth }) {
+	for (RID t : { albedo, normal, orm, emission, depth, direct }) {
 		RD::get_singleton()->texture_clear(t, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
+
+	Vector<String> modes = { "" };
+	light_shader.initialize(modes);
+	light_shader_version = light_shader.version_create();
+	light_pipeline = RD::get_singleton()->compute_pipeline_create(light_shader.version_get_shader(light_shader_version, 0));
+	light_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 16 + sizeof(uint32_t) * 4);
+	sdf_params_buffer = RD::get_singleton()->uniform_buffer_create(sizeof(float) * 4 * 9);
+	{
+		RD::TextureFormat dtf;
+		dtf.texture_type = RD::TEXTURE_TYPE_3D;
+		dtf.width = 1;
+		dtf.height = 1;
+		dtf.depth = 1;
+		dtf.format = RD::DATA_FORMAT_R8_UNORM;
+		dtf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT;
+		dummy_sdf_tex = RD::get_singleton()->texture_create(dtf, RD::TextureView());
 	}
 }
 
 SurfaceCacheEffect::~SurfaceCacheEffect() {
 	capture_list.reset();
-	for (RID rid : { framebuffer, depth_stencil, depth, emission, orm, normal, albedo }) {
+	if (light_shader_version.is_valid()) {
+		light_shader.version_free(light_shader_version);
+	}
+	for (RID rid : { framebuffer, depth_stencil, depth, direct, emission, orm, normal, albedo, card_buffer, light_params_buffer, sdf_params_buffer, dummy_sdf_tex }) {
 		if (rid.is_valid()) {
 			RD::get_singleton()->free_rid(rid);
 		}
@@ -292,6 +317,8 @@ void SurfaceCacheEffect::begin_frame(uint64_t p_frame, const PagedArray<RenderGe
 	stats.instances = instance_map.size();
 	stats.cards = cards.size() - free_cards.size();
 	stats.captured = 0;
+	stats.lit = 0;
+	captured_this_frame.clear();
 	stats.dirty = 0;
 	stats.atlas_texels = 0;
 	for (const Card &c : cards) {
@@ -335,6 +362,145 @@ void SurfaceCacheEffect::capture(CaptureFunction p_capture, void *p_userdata) {
 		c.dirty = false;
 		c.captured_frame = frame;
 		stats.captured++;
+		captured_this_frame.push_back(pending[i].card);
 	}
 	capture_list.clear();
+}
+
+void SurfaceCacheEffect::light_cards(RID p_directional_buffer, uint32_t p_directional_count, RID p_omni_buffer, uint32_t p_omni_count, RID p_spot_buffer, uint32_t p_spot_count, const Transform3D &p_view_to_world, const Vector<RID> &p_sdf_cascades, const Vector<Vector4> &p_sdf_offsets, uint32_t p_sdf_grid_size, float p_sdf_y_mult) {
+	// Cards to light: captured this frame plus every light_share-th resident card.
+	LocalVector<uint32_t> todo;
+	for (uint32_t id : captured_this_frame) {
+		todo.push_back(id);
+	}
+	for (uint32_t i = light_round_robin; i < cards.size(); i += light_share) {
+		const Card &c = cards[i];
+		if (c.instance_id != 0xFFFFFFFF && c.rect.size != Size2i() && !c.dirty && c.captured_frame != frame) {
+			todo.push_back(i);
+		}
+	}
+	light_round_robin = (light_round_robin + 1) % light_share;
+	if (todo.is_empty()) {
+		return;
+	}
+
+	struct CardData {
+		int32_t rect[4];
+		float view_to_world[16];
+		float extents[4];
+	};
+	LocalVector<CardData> gpu_cards;
+	gpu_cards.resize(cards.size());
+	for (uint32_t i = 0; i < cards.size(); i++) {
+		const Card &c = cards[i];
+		CardData &d = gpu_cards[i];
+		d.rect[0] = c.rect.position.x;
+		d.rect[1] = c.rect.position.y;
+		d.rect[2] = c.rect.size.x;
+		d.rect[3] = c.rect.size.y;
+		MaterialStorage::store_transform(c.capture_transform, d.view_to_world);
+		// Orthographic extents from the projection: x = 1/m00, y = 1/m11, depth range = zfar.
+		d.extents[0] = c.capture_projection.columns[0][0] != 0.0f ? 1.0f / c.capture_projection.columns[0][0] : 0.0f;
+		d.extents[1] = c.capture_projection.columns[1][1] != 0.0f ? 1.0f / c.capture_projection.columns[1][1] : 0.0f;
+		d.extents[2] = c.capture_projection.get_z_far();
+		d.extents[3] = 0.0f;
+	}
+	uint32_t needed = gpu_cards.size() * sizeof(CardData);
+	if (card_buffer.is_null() || card_buffer_size < needed) {
+		if (card_buffer.is_valid()) {
+			RD::get_singleton()->free_rid(card_buffer);
+		}
+		card_buffer_size = MAX(needed, 64u * uint32_t(sizeof(CardData)));
+		card_buffer = RD::get_singleton()->storage_buffer_create(card_buffer_size);
+	}
+	RD::get_singleton()->buffer_update(card_buffer, 0, needed, gpu_cards.ptr());
+
+	struct Params {
+		float view_to_world[16];
+		uint32_t counts[4];
+	} params;
+	MaterialStorage::store_transform(p_view_to_world, params.view_to_world);
+	params.counts[0] = p_directional_count;
+	params.counts[1] = p_omni_count;
+	params.counts[2] = p_spot_count;
+	params.counts[3] = p_sdf_cascades.size() > 0 ? 1 : 0;
+	{
+		float sdf_params[4 * 9] = {};
+		sdf_params[0] = float(p_sdf_grid_size);
+		sdf_params[1] = p_sdf_y_mult;
+		sdf_params[2] = float(MIN(p_sdf_cascades.size(), 8));
+		for (int i = 0; i < MIN(p_sdf_offsets.size(), 8); i++) {
+			sdf_params[4 + i * 4 + 0] = p_sdf_offsets[i].x;
+			sdf_params[4 + i * 4 + 1] = p_sdf_offsets[i].y;
+			sdf_params[4 + i * 4 + 2] = p_sdf_offsets[i].z;
+			sdf_params[4 + i * 4 + 3] = p_sdf_offsets[i].w;
+		}
+		RD::get_singleton()->buffer_update(sdf_params_buffer, 0, sizeof(sdf_params), sdf_params);
+	}
+	RD::get_singleton()->buffer_update(light_params_buffer, 0, sizeof(Params), &params);
+
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	RID shader = light_shader.version_get_shader(light_shader_version, 0);
+	Vector<RD::Uniform> uniforms;
+	auto add = [&](RD::UniformType p_type, int p_binding, RID p_rid) {
+		RD::Uniform u;
+		u.uniform_type = p_type;
+		u.binding = p_binding;
+		u.append_id(p_rid);
+		uniforms.push_back(u);
+	};
+	add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, card_buffer);
+	add(RD::UNIFORM_TYPE_TEXTURE, 1, albedo);
+	add(RD::UNIFORM_TYPE_TEXTURE, 2, normal);
+	add(RD::UNIFORM_TYPE_TEXTURE, 3, depth);
+	add(RD::UNIFORM_TYPE_TEXTURE, 4, emission);
+	add(RD::UNIFORM_TYPE_IMAGE, 5, direct);
+	add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 6, p_directional_buffer); // Directional lights live in a UBO in LightStorage.
+	add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_omni_buffer);
+	add(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_spot_buffer);
+	add(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 9, light_params_buffer);
+	add(RD::UNIFORM_TYPE_SAMPLER, 10, material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+	add(RD::UNIFORM_TYPE_SAMPLER, 11, material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+	if (light_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(light_uniform_set)) {
+		light_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, shader, 0);
+	}
+	RID set0 = light_uniform_set;
+
+	Vector<RID> sdf_textures;
+	for (int i = 0; i < 8; i++) {
+		sdf_textures.push_back(i < p_sdf_cascades.size() ? p_sdf_cascades[i] : dummy_sdf_tex);
+	}
+	if (sdf_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set) || sdf_uniform_set_textures != sdf_textures) {
+		Vector<RD::Uniform> su;
+		RD::Uniform u;
+		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+		u.binding = 0;
+		u.append_id(sdf_params_buffer);
+		su.push_back(u);
+		RD::Uniform t;
+		t.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		t.binding = 1;
+		for (RID r : sdf_textures) {
+			t.append_id(r);
+		}
+		su.push_back(t);
+		if (sdf_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sdf_uniform_set)) {
+			RD::get_singleton()->free_rid(sdf_uniform_set);
+		}
+		sdf_uniform_set = RD::get_singleton()->uniform_set_create(su, shader, 1);
+		sdf_uniform_set_textures = sdf_textures;
+	}
+
+	RD::ComputeListID cl = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(cl, light_pipeline);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, set0, 0);
+	RD::get_singleton()->compute_list_bind_uniform_set(cl, sdf_uniform_set, 1);
+	for (uint32_t id : todo) {
+		const Card &c = cards[id];
+		uint32_t pc[4] = { id, light_debug ? 1u : 0u, 0, 0 };
+		RD::get_singleton()->compute_list_set_push_constant(cl, pc, sizeof(pc));
+		RD::get_singleton()->compute_list_dispatch(cl, Math::division_round_up(uint32_t(c.rect.size.x), 8u), Math::division_round_up(uint32_t(c.rect.size.y), 8u), 1);
+		stats.lit++;
+	}
+	RD::get_singleton()->compute_list_end();
 }

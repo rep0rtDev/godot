@@ -2414,10 +2414,36 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		surface_cache->capture(_surface_cache_capture, this);
 		if (OS::get_singleton()->is_stdout_verbose() && (RSG::rasterizer->get_frame_number() % 30) == 0) {
 			const RendererRD::SurfaceCacheEffect::Stats &st = surface_cache->get_stats();
-			print_line(vformat("surface cache: instances %d cards %d captured %d dirty %d atlas %.1f%%", st.instances, st.cards, st.captured, st.dirty, 100.0 * double(st.atlas_texels) / double(surface_cache->get_atlas_size()) / double(surface_cache->get_atlas_size())));
+			print_line(vformat("surface cache: instances %d cards %d captured %d lit %d dirty %d atlas %.1f%%", st.instances, st.cards, st.captured, st.lit, st.dirty, 100.0 * double(st.atlas_texels) / double(surface_cache->get_atlas_size()) / double(surface_cache->get_atlas_size())));
 		}
 	}
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sscs, using_sdfgi || using_voxelgi, normal_roughness_views, voxel_gi_views);
+
+	if (surface_cache->is_enabled() && !is_reflection_probe && p_render_data->scene_data->view_count == 1) {
+		RENDER_TIMESTAMP("Surface Cache Lighting");
+		{
+			RendererRD::LightStorage *ls = RendererRD::LightStorage::get_singleton();
+			Vector<RID> sdf_cascades;
+			Vector<Vector4> sdf_offsets;
+			uint32_t sdf_grid_size = 0;
+			float sdf_y_mult = 1.0f;
+			if (rb.is_valid() && rb->has_custom_data(RB_SCOPE_SDFGI)) {
+				Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
+				sdf_grid_size = sdfgi->cascade_size;
+				sdf_y_mult = sdfgi->y_mult;
+				for (uint32_t i = 0; i < sdfgi->cascades.size(); i++) {
+					sdf_cascades.push_back(sdfgi->cascades[i].sdf_tex);
+					Vector3 offset = Vector3((Vector3i(1, 1, 1) * -int32_t(sdfgi->cascade_size >> 1) + sdfgi->cascades[i].position)) * sdfgi->cascades[i].cell_size;
+					sdf_offsets.push_back(Vector4(offset.x, offset.y, offset.z, 1.0f / sdfgi->cascades[i].cell_size));
+				}
+			}
+			surface_cache->light_cards(ls->get_directional_light_buffer(), p_render_data->directional_light_count, ls->get_omni_light_buffer(), ls->get_omni_light_count(), ls->get_spot_light_buffer(), ls->get_spot_light_count(), p_render_data->scene_data->cam_transform, sdf_cascades, sdf_offsets, sdf_grid_size, sdf_y_mult);
+			if (OS::get_singleton()->is_stdout_verbose() && (RSG::rasterizer->get_frame_number() % 30) == 0) {
+				const RendererRD::SurfaceCacheEffect::Stats &st = surface_cache->get_stats();
+				print_line(vformat("surface cache light: cards %d dir %d omni %d spot %d sdf cascades %d", st.lit, p_render_data->directional_light_count, ls->get_omni_light_count(), ls->get_spot_light_count(), sdf_cascades.size()));
+			}
+		}
+	}
 
 	if (current_cluster_builder) {
 		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
@@ -2840,8 +2866,11 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 			case 4:
 				atlas = surface_cache->get_emission_texture();
 				break;
-			default:
+			case 5:
 				atlas = surface_cache->get_depth_texture();
+				break;
+			default:
+				atlas = surface_cache->get_direct_texture();
 				break;
 		}
 		RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
